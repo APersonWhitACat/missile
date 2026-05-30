@@ -566,6 +566,7 @@ def run_simulation():
     target_max_speed = target_max_mach * sound_speed
 
     all_hit_times = []
+    all_activation_to_hit_times = []
 
     all_first_ping_distances = []
     all_first_ping_times = []
@@ -598,6 +599,7 @@ def run_simulation():
     final_ping_distance = None
     final_ping_time = None
     final_activation_point = None
+    final_activation_time = None
     final_notch_point = None
     final_angle_change_point = None
     final_notch_side = None
@@ -605,6 +607,7 @@ def run_simulation():
     final_intercepted = False
     final_end_time = None
     final_end_distance = None
+    final_activation_to_intercept_time = None
 
     for run in range(int(runs)):
         missile_mach = launch_platform_mach
@@ -623,6 +626,7 @@ def run_simulation():
         missile_vel = vec_mul(missile_dir, missile_speed)
 
         time = 0
+        activation_time = None
         ping_timer = 0
         rwr_ping_visible_timer = 0
 
@@ -664,6 +668,7 @@ def run_simulation():
 
             if not reached_activation_range and distance <= activation_range * 1000:
                 reached_activation_range = True
+                activation_time = time
 
                 activation_point = (
                     missile_pos[0] / 1000,
@@ -676,6 +681,7 @@ def run_simulation():
 
                 if run == 0:
                     final_activation_point = activation_point
+                    final_activation_time = activation_time
 
             if change_target_angle and not angle_changed and not notch_started:
                 current_alt_km = target_pos[2] / 1000
@@ -956,6 +962,9 @@ def run_simulation():
                 intercepted = True
                 all_hit_times.append(time)
 
+                if activation_time is not None:
+                    all_activation_to_hit_times.append(time - activation_time)
+
                 mx.append(missile_pos[0] / 1000)
                 my.append(missile_pos[1] / 1000)
                 mz.append(missile_pos[2] / 1000)
@@ -993,6 +1002,9 @@ def run_simulation():
                     final_intercepted = True
                     final_end_time = time
                     final_end_distance = closest_distance / 1000
+
+                    if activation_time is not None:
+                        final_activation_to_intercept_time = time - activation_time
 
                 break
 
@@ -1086,6 +1098,9 @@ def run_simulation():
                 if distance_list:
                     final_end_time = time_list[-1]
                     final_end_distance = distance_list[-1]
+
+                    if final_activation_time is not None:
+                        final_activation_to_intercept_time = None
                 else:
                     final_end_time = time
                     final_end_distance = None
@@ -1103,8 +1118,15 @@ def run_simulation():
         avg_ping_z = sum(p[2] for p in all_first_ping_points) / len(all_first_ping_points)
         avg_ping_point = (avg_ping_x, avg_ping_y, avg_ping_z)
 
+    avg_activation_to_hit_time = None
+
+    if all_activation_to_hit_times:
+        avg_activation_to_hit_time = sum(all_activation_to_hit_times) / len(all_activation_to_hit_times)
+
     return {
         "all_hit_times": all_hit_times,
+        "all_activation_to_hit_times": all_activation_to_hit_times,
+        "avg_activation_to_hit_time": avg_activation_to_hit_time,
         "all_activation_times": all_activation_times,
         "all_activation_distances": all_activation_distances,
         "all_notch_times": all_notch_times,
@@ -1140,6 +1162,8 @@ def run_simulation():
         "avg_ping_time": avg_ping_time,
 
         "final_activation_point": final_activation_point,
+        "final_activation_time": final_activation_time,
+        "final_activation_to_intercept_time": final_activation_to_intercept_time,
         "final_notch_point": final_notch_point,
         "final_angle_change_point": final_angle_change_point,
         "final_notch_side": final_notch_side,
@@ -1159,6 +1183,9 @@ if run_button:
         st.write(f"Average intercept time: **{sum(result['all_hit_times']) / len(result['all_hit_times']):.2f} sec**")
     else:
         st.write("Missile failed to intercept within max simulation time.")
+
+    if result["avg_activation_to_hit_time"] is not None:
+        st.write(f"Average seeker activation → intercept time: **{result['avg_activation_to_hit_time']:.2f} sec**")
 
     if result["all_activation_times"]:
         st.write(f"Missile reached seeker activation range: **{sum(result['all_activation_distances']) / len(result['all_activation_distances']):.2f} km**")
@@ -1197,6 +1224,7 @@ if run_button:
         fig = go.Figure()
 
         missile_hover = []
+
         for i in range(len(final_mx)):
             missile_hover.append(
                 f"Missile<br>"
@@ -1221,6 +1249,7 @@ if run_button:
             )
 
         target_hover = []
+
         for i in range(len(final_tx)):
             target_hover.append(
                 f"Target<br>"
@@ -1308,7 +1337,8 @@ if run_button:
                 marker=dict(size=9),
                 hovertext=[
                     f"Seeker activation range marker<br>"
-                    f"Activation range: {activation_range:.2f} km"
+                    f"Activation range: {activation_range:.2f} km<br>"
+                    f"Time: {result['final_activation_time']:.2f}s"
                 ],
                 hoverinfo="text"
             ))
@@ -1356,15 +1386,23 @@ if run_button:
         if result["final_intercepted"]:
             end_name = "Intercept"
             end_text = "Intercept"
+
+            activation_to_intercept_text = "unknown"
+            if result["final_activation_to_intercept_time"] is not None:
+                activation_to_intercept_text = f"{result['final_activation_to_intercept_time']:.2f}s"
+
             end_hover = [
                 f"Intercept<br>"
                 f"Time: {result['final_end_time']:.2f}s<br>"
-                f"Miss distance: {result['final_end_distance'] * 1000:.2f} m"
+                f"Miss distance: {result['final_end_distance'] * 1000:.2f} m<br>"
+                f"Seeker activation to intercept: {activation_to_intercept_text}"
             ]
         else:
             end_name = "Simulation end"
             end_text = "End"
+
             final_dist_text = f"{result['final_end_distance']:.2f} km" if result["final_end_distance"] is not None else "unknown"
+
             end_hover = [
                 f"Simulation ended without intercept<br>"
                 f"Final distance: {final_dist_text}<br>"
