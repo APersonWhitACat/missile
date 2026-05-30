@@ -16,8 +16,6 @@ MAX_TIME = 300.0
 USE_GRAVITY = True
 GRAVITY = 9.81
 
-NOTCH_BREAK_TURN_RATE_DEG = 220.0
-NOTCH_HOLD_TURN_RATE_DEG = 85.0
 NOTCH_BREAK_TIME = 1.2
 
 
@@ -195,6 +193,13 @@ with st.sidebar:
     target_max_mach = st.number_input("Target maximum speed Mach", value=float(target_mach_start), step=0.1)
     target_heading = st.number_input("Target horizontal heading degrees", value=0.0, step=5.0)
     target_climb = st.number_input("Target climb/descent angle degrees", value=0.0, step=1.0)
+
+    target_turn_rate_deg = st.number_input(
+        "Target turn rate deg/sec",
+        value=45.0,
+        min_value=1.0,
+        step=1.0
+    )
 
     if target_max_mach < target_mach_start:
         target_max_mach = target_mach_start
@@ -436,9 +441,19 @@ def run_simulation():
                     should_change = True
 
                 if should_change:
-                    current_target_dir = direction_3d(new_target_heading, new_target_climb)
+                    desired_target_dir = direction_3d(new_target_heading, new_target_climb)
+
+                    current_target_dir = turn_toward_direction(
+                        current_target_dir,
+                        desired_target_dir,
+                        target_turn_rate_deg,
+                        DT
+                    )
+
                     target_vel = vec_mul(current_target_dir, target_speed)
-                    angle_changed = True
+
+                    if vec_dot(current_target_dir, desired_target_dir) > 0.999:
+                        angle_changed = True
 
                     angle_change_point = (
                         target_pos[0] / 1000,
@@ -446,9 +461,10 @@ def run_simulation():
                         target_pos[2] / 1000
                     )
 
-                    all_angle_change_times.append(time)
+                    if len(all_angle_change_times) == 0 or run == 0:
+                        all_angle_change_times.append(time)
 
-                    if run == 0:
+                    if run == 0 and final_angle_change_point is None:
                         final_angle_change_point = angle_change_point
 
             if notch_mode != 0 and not notch_started:
@@ -519,18 +535,21 @@ def run_simulation():
 
                     notch_elapsed = time - notch_start_time
 
+                    notch_break_rate = target_turn_rate_deg * 2.0
+                    notch_hold_rate = target_turn_rate_deg
+
                     if notch_elapsed < NOTCH_BREAK_TIME:
                         current_target_dir = turn_toward_direction(
                             current_target_dir,
                             desired_notch_dir,
-                            NOTCH_BREAK_TURN_RATE_DEG,
+                            notch_break_rate,
                             DT
                         )
                     else:
                         current_target_dir = turn_toward_direction(
                             current_target_dir,
                             desired_notch_dir,
-                            NOTCH_HOLD_TURN_RATE_DEG,
+                            notch_hold_rate,
                             DT
                         )
 
@@ -937,6 +956,7 @@ if run_button:
                 f"Speed: Mach {result['final_target_mach'][i]:.2f}<br>"
                 f"Speed: {result['final_target_ms'][i]:.0f} m/s<br>"
                 f"Max speed: Mach {target_max_mach:.2f}<br>"
+                f"Turn rate setting: {target_turn_rate_deg:.1f}°/s<br>"
                 f"True 3D distance to missile: {result['final_distance'][i]:.2f} km<br>"
                 f"X: {final_tx[i]:.2f} km<br>"
                 f"Y: {final_ty[i]:.2f} km<br>"
@@ -996,6 +1016,7 @@ if run_button:
                 f"Target start<br>"
                 f"Mach {target_mach_start:.2f}<br>"
                 f"Max Mach {target_max_mach:.2f}<br>"
+                f"Turn rate: {target_turn_rate_deg:.1f}°/s<br>"
                 f"Alt {target_altitude:.2f} km"
             ],
             hoverinfo="text"
@@ -1032,7 +1053,8 @@ if run_button:
                     f"Target started notching<br>"
                     f"Notch mode: {notch_mode}<br>"
                     f"Side: fixed {result['final_notch_side']}<br>"
-                    f"Vertical angle: {notch_vertical_angle:.2f}°"
+                    f"Vertical angle: {notch_vertical_angle:.2f}°<br>"
+                    f"Target turn rate: {target_turn_rate_deg:.1f}°/s"
                 ],
                 hoverinfo="text"
             ))
@@ -1051,7 +1073,8 @@ if run_button:
                     f"Target direction change<br>"
                     f"Changed at altitude: {change_altitude:.2f} km<br>"
                     f"New heading: {new_target_heading:.2f}°<br>"
-                    f"New climb angle: {new_target_climb:.2f}°"
+                    f"New climb angle: {new_target_climb:.2f}°<br>"
+                    f"Turn rate: {target_turn_rate_deg:.1f}°/s"
                 ],
                 hoverinfo="text"
             ))
