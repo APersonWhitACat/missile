@@ -142,6 +142,16 @@ def limit_missile_g(old_vel, commanded_vel, max_g, dt):
     return vec_mul(limited_dir, commanded_speed)
 
 
+def motor_thrust_at_time(time_s, booster_thrust, booster_time, sustainer_thrust, sustainer_time):
+    if time_s < booster_time:
+        return booster_thrust
+
+    if time_s < booster_time + sustainer_time:
+        return sustainer_thrust
+
+    return 0.0
+
+
 def choose_notch_side(target_pos, missile_pos, current_target_dir):
     to_missile = [
         missile_pos[0] - target_pos[0],
@@ -258,16 +268,27 @@ with st.sidebar:
         )
         notch_vertical_angle = max(-60, min(60, notch_vertical_angle))
 
-    st.header("Missile / Launch Properties")
-    missile_altitude = st.number_input("Missile / launch aircraft altitude km", value=float(target_altitude), step=0.5)
-    missile_mach_start = st.number_input("Missile speed Mach", value=4.0, step=0.1)
+    st.header("Missile / Launch Platform")
+    missile_altitude = st.number_input("Launch platform altitude km", value=float(target_altitude), step=0.5)
+    launch_platform_mach = st.number_input("Launch platform speed Mach", value=1.2, step=0.1)
+
+    missile_mass_kg = st.number_input("Missile mass kg", value=168.0, min_value=1.0, step=1.0)
+
+    booster_thrust_n = st.number_input("Booster thrust N", value=19500.0, min_value=0.0, step=500.0)
+    booster_burn_time = st.number_input("Booster burn time s", value=8.0, min_value=0.0, step=0.5)
+
+    sustainer_thrust_n = st.number_input("Sustainer thrust N", value=0.0, min_value=0.0, step=500.0)
+    sustainer_burn_time = st.number_input("Sustainer burn time s", value=0.0, min_value=0.0, step=0.5)
+
     missile_max_g = st.number_input("Missile max G", value=40.0, min_value=1.0, step=1.0)
+
     missile_drag_mach = st.number_input(
         "Base missile drag Mach/sec at sea level",
         value=0.02,
         step=0.005,
         format="%.4f"
     )
+
     start_horizontal_range = st.number_input("Starting horizontal distance from target km", value=40.0, step=1.0)
     activation_range = st.number_input("Seeker activation range km", value=12.0, step=0.5)
 
@@ -281,18 +302,11 @@ with st.sidebar:
         loft_angle = st.number_input("Maximum missile loft angle degrees", value=25.0, step=1.0)
 
     st.header("Terminal Guidance")
-    guidance_type = st.selectbox(
-        "Terminal guidance type",
-        options=[2, 1],
-        format_func=lambda x: "2 = APN" if x == 2 else "1 = Pure Pursuit"
-    )
+    guidance_type = 2
+    st.write("Guidance: APN only")
 
-    nav_constant = None
-    apn_gain = 1.0
-
-    if guidance_type == 2:
-        nav_constant = st.number_input("Navigation constant N", value=4.0, step=0.1)
-        apn_gain = st.number_input("APN target acceleration gain", value=1.0, step=0.1)
+    nav_constant = st.number_input("Navigation constant N", value=4.0, step=0.1)
+    apn_gain = st.number_input("APN target acceleration gain", value=1.0, step=0.1)
 
     st.header("LPI / Simulation")
     has_lpi = st.checkbox("Does missile have LPI", value=False)
@@ -348,6 +362,8 @@ def run_simulation():
     final_drag_factor = []
     final_actual_drag = []
     final_turn_rate = []
+    final_thrust = []
+    final_motor_accel = []
 
     final_ping_point = None
     final_ping_distance = None
@@ -362,7 +378,7 @@ def run_simulation():
     final_end_distance = None
 
     for run in range(int(runs)):
-        missile_mach = missile_mach_start
+        missile_mach = launch_platform_mach
         target_mach = target_mach_start
 
         missile_speed = missile_mach * sound_speed
@@ -406,6 +422,8 @@ def run_simulation():
         drag_factor_list = []
         actual_drag_list = []
         turn_rate_list = []
+        thrust_list = []
+        motor_accel_list = []
 
         while time <= MAX_TIME:
             prev_target_pos = target_pos[:]
@@ -606,57 +624,71 @@ def run_simulation():
                 commanded_missile_vel = vec_mul(desired_dir, missile_speed)
 
             else:
-                if guidance_type == 1:
-                    phase = "Pure Pursuit"
-                    desired_dir = vec_norm(rel_pos)
-                    commanded_missile_vel = vec_mul(desired_dir, missile_speed)
+                phase = "APN"
 
-                else:
-                    phase = "APN"
+                omega = vec_mul(
+                    vec_cross(rel_pos, rel_vel),
+                    1 / max(distance * distance, 1e-9)
+                )
 
-                    omega = vec_mul(
-                        vec_cross(rel_pos, rel_vel),
-                        1 / max(distance * distance, 1e-9)
-                    )
+                closing_speed = -vec_dot(rel_pos, rel_vel) / max(distance, 1e-9)
+                closing_speed = max(closing_speed, 0)
 
-                    closing_speed = -vec_dot(rel_pos, rel_vel) / max(distance, 1e-9)
-                    closing_speed = max(closing_speed, 0)
+                los_unit = vec_norm(rel_pos)
+                target_accel_vec = vec_mul(current_target_dir, target_accel_ms)
 
-                    los_unit = vec_norm(rel_pos)
-                    target_accel_vec = vec_mul(current_target_dir, target_accel_ms)
+                pn_accel = vec_mul(
+                    vec_cross(los_unit, omega),
+                    -nav_constant * closing_speed
+                )
 
-                    pn_accel = vec_mul(
-                        vec_cross(los_unit, omega),
-                        -nav_constant * closing_speed
-                    )
+                target_accel_parallel = vec_mul(
+                    los_unit,
+                    vec_dot(target_accel_vec, los_unit)
+                )
 
-                    target_accel_parallel = vec_mul(
-                        los_unit,
-                        vec_dot(target_accel_vec, los_unit)
-                    )
+                target_accel_perp = vec_sub(
+                    target_accel_vec,
+                    target_accel_parallel
+                )
 
-                    target_accel_perp = vec_sub(
-                        target_accel_vec,
-                        target_accel_parallel
-                    )
+                apn_accel = vec_mul(
+                    target_accel_perp,
+                    apn_gain * nav_constant / 2
+                )
 
-                    apn_accel = vec_mul(
-                        target_accel_perp,
-                        apn_gain * nav_constant / 2
-                    )
+                commanded_accel = vec_add(pn_accel, apn_accel)
 
-                    commanded_accel = vec_add(pn_accel, apn_accel)
-
-                    commanded_missile_vel = vec_add(
-                        missile_vel,
-                        vec_mul(commanded_accel, DT)
-                    )
+                commanded_missile_vel = vec_add(
+                    missile_vel,
+                    vec_mul(commanded_accel, DT)
+                )
 
             missile_vel = limit_missile_g(
                 missile_vel,
                 commanded_missile_vel,
                 missile_max_g,
                 DT
+            )
+
+            current_thrust_n = motor_thrust_at_time(
+                time,
+                booster_thrust_n,
+                booster_burn_time,
+                sustainer_thrust_n,
+                sustainer_burn_time
+            )
+
+            motor_accel_ms2 = current_thrust_n / max(missile_mass_kg, 1.0)
+
+            if vec_mag(missile_vel) > 1e-6:
+                thrust_dir = vec_norm(missile_vel)
+            else:
+                thrust_dir = vec_norm(rel_pos)
+
+            missile_vel = vec_add(
+                missile_vel,
+                vec_mul(thrust_dir, motor_accel_ms2 * DT)
             )
 
             if USE_GRAVITY:
@@ -725,6 +757,8 @@ def run_simulation():
                 drag_factor_list.append(drag_factor)
                 actual_drag_list.append(actual_drag)
                 turn_rate_list.append(actual_turn_rate)
+                thrust_list.append(current_thrust_n)
+                motor_accel_list.append(motor_accel_ms2)
 
                 if run == 0:
                     final_intercepted = True
@@ -786,6 +820,8 @@ def run_simulation():
             drag_factor_list.append(drag_factor)
             actual_drag_list.append(actual_drag)
             turn_rate_list.append(actual_turn_rate)
+            thrust_list.append(current_thrust_n)
+            motor_accel_list.append(motor_accel_ms2)
 
             time += DT
 
@@ -809,6 +845,8 @@ def run_simulation():
             final_drag_factor = drag_factor_list
             final_actual_drag = actual_drag_list
             final_turn_rate = turn_rate_list
+            final_thrust = thrust_list
+            final_motor_accel = motor_accel_list
 
             final_ping_point = first_ping_point
             final_ping_distance = first_ping_distance
@@ -861,6 +899,8 @@ def run_simulation():
         "final_drag_factor": final_drag_factor,
         "final_actual_drag": final_actual_drag,
         "final_turn_rate": final_turn_rate,
+        "final_thrust": final_thrust,
+        "final_motor_accel": final_motor_accel,
 
         "final_ping_point": final_ping_point,
         "final_ping_distance": final_ping_distance,
@@ -935,6 +975,10 @@ if run_button:
                 f"Phase: {result['final_phase'][i]}<br>"
                 f"Speed: Mach {result['final_missile_mach'][i]:.2f}<br>"
                 f"Speed: {result['final_missile_ms'][i]:.0f} m/s<br>"
+                f"Launch platform Mach: {launch_platform_mach:.2f}<br>"
+                f"Motor thrust: {result['final_thrust'][i]:.0f} N<br>"
+                f"Motor accel: {result['final_motor_accel'][i]:.1f} m/s²<br>"
+                f"Missile mass: {missile_mass_kg:.1f} kg<br>"
                 f"Max G: {missile_max_g:.1f}G<br>"
                 f"Turn rate: {result['final_turn_rate'][i]:.1f}°/s<br>"
                 f"Gravity: {'ON' if USE_GRAVITY else 'OFF'}<br>"
@@ -963,7 +1007,7 @@ if run_button:
                 f"Alt: {final_tz[i]:.2f} km"
             )
 
-        terminal_name = "Pure Pursuit" if guidance_type == 1 else f"APN, N={nav_constant}"
+        terminal_name = f"APN, N={nav_constant}"
         guidance_name = f"Loft aim {loft_angle}° + {terminal_name}" if use_loft else terminal_name
 
         fig.add_trace(go.Scatter3d(
@@ -993,11 +1037,12 @@ if run_button:
             y=[final_my[0]],
             z=[final_mz[0]],
             mode="markers+text",
-            name="Missile start",
-            text=["Missile start"],
+            name="Missile launch",
+            text=["Missile launch"],
             marker=dict(size=6),
             hovertext=[
-                f"Missile start<br>"
+                f"Missile launch<br>"
+                f"Launch platform Mach: {launch_platform_mach:.2f}<br>"
                 f"Starting horizontal range: {start_horizontal_range:.2f} km<br>"
                 f"Alt: {missile_altitude:.2f} km"
             ],
