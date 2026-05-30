@@ -114,6 +114,36 @@ def turn_toward_direction(old_dir, desired_dir, turn_rate_deg_per_sec, dt):
     return vec_norm(new_dir)
 
 
+def limit_missile_g(old_vel, commanded_vel, max_g, dt):
+    old_speed = vec_mag(old_vel)
+    commanded_speed = vec_mag(commanded_vel)
+
+    if old_speed < 1e-6 or commanded_speed < 1e-6:
+        return commanded_vel
+
+    old_dir = vec_norm(old_vel)
+    commanded_dir = vec_norm(commanded_vel)
+
+    max_lat_accel = max_g * GRAVITY
+    max_turn_rad = (max_lat_accel / max(old_speed, 1.0)) * dt
+
+    dot = max(-1, min(1, vec_dot(old_dir, commanded_dir)))
+    angle = math.acos(dot)
+
+    if angle <= max_turn_rad:
+        return commanded_vel
+
+    blend = max_turn_rad / max(angle, 1e-9)
+
+    limited_dir = vec_norm([
+        old_dir[0] * (1 - blend) + commanded_dir[0] * blend,
+        old_dir[1] * (1 - blend) + commanded_dir[1] * blend,
+        old_dir[2] * (1 - blend) + commanded_dir[2] * blend
+    ])
+
+    return vec_mul(limited_dir, commanded_speed)
+
+
 def choose_notch_side(target_pos, missile_pos, current_target_dir):
     to_missile = [
         missile_pos[0] - target_pos[0],
@@ -226,6 +256,7 @@ with st.sidebar:
     st.header("Missile / Launch Properties")
     missile_altitude = st.number_input("Missile / launch aircraft altitude km", value=float(target_altitude), step=0.5)
     missile_mach_start = st.number_input("Missile speed Mach", value=4.0, step=0.1)
+    missile_max_g = st.number_input("Missile max G", value=40.0, min_value=1.0, step=1.0)
     missile_drag_mach = st.number_input(
         "Base missile drag Mach/sec at sea level",
         value=0.02,
@@ -311,6 +342,7 @@ def run_simulation():
     final_target_phase = []
     final_drag_factor = []
     final_actual_drag = []
+    final_turn_rate = []
 
     final_ping_point = None
     final_ping_distance = None
@@ -368,10 +400,12 @@ def run_simulation():
         target_phase_list = []
         drag_factor_list = []
         actual_drag_list = []
+        turn_rate_list = []
 
         while time <= MAX_TIME:
             prev_target_pos = target_pos[:]
             prev_missile_pos = missile_pos[:]
+            prev_missile_vel = missile_vel[:]
 
             rel_pos = vec_sub(target_pos, missile_pos)
             distance = vec_mag(rel_pos)
@@ -550,13 +584,13 @@ def run_simulation():
                 ))
 
                 phase = f"Loft aim {current_loft_angle:.1f}"
-                missile_vel = vec_mul(desired_dir, missile_speed)
+                commanded_missile_vel = vec_mul(desired_dir, missile_speed)
 
             else:
                 if guidance_type == 1:
                     phase = "Pure Pursuit"
                     desired_dir = vec_norm(rel_pos)
-                    missile_vel = vec_mul(desired_dir, missile_speed)
+                    commanded_missile_vel = vec_mul(desired_dir, missile_speed)
 
                 else:
                     phase = "APN"
@@ -594,10 +628,17 @@ def run_simulation():
 
                     commanded_accel = vec_add(pn_accel, apn_accel)
 
-                    missile_vel = vec_add(
+                    commanded_missile_vel = vec_add(
                         missile_vel,
                         vec_mul(commanded_accel, DT)
                     )
+
+            missile_vel = limit_missile_g(
+                missile_vel,
+                commanded_missile_vel,
+                missile_max_g,
+                DT
+            )
 
             if USE_GRAVITY:
                 missile_vel[2] -= GRAVITY * DT
@@ -614,6 +655,12 @@ def run_simulation():
 
             missile_vel = vec_mul(vec_norm(missile_vel), missile_speed)
             missile_pos = vec_add(missile_pos, vec_mul(missile_vel, DT))
+
+            old_dir_for_turn = vec_norm(prev_missile_vel)
+            new_dir_for_turn = vec_norm(missile_vel)
+            turn_dot = max(-1, min(1, vec_dot(old_dir_for_turn, new_dir_for_turn)))
+            turn_angle = math.degrees(math.acos(turn_dot))
+            actual_turn_rate = turn_angle / DT if DT > 0 else 0
 
             rel_pos = vec_sub(target_pos, missile_pos)
             distance = vec_mag(rel_pos)
@@ -658,6 +705,7 @@ def run_simulation():
 
                 drag_factor_list.append(drag_factor)
                 actual_drag_list.append(actual_drag)
+                turn_rate_list.append(actual_turn_rate)
 
                 if run == 0:
                     final_intercepted = True
@@ -718,6 +766,7 @@ def run_simulation():
 
             drag_factor_list.append(drag_factor)
             actual_drag_list.append(actual_drag)
+            turn_rate_list.append(actual_turn_rate)
 
             time += DT
 
@@ -740,6 +789,7 @@ def run_simulation():
             final_target_phase = target_phase_list
             final_drag_factor = drag_factor_list
             final_actual_drag = actual_drag_list
+            final_turn_rate = turn_rate_list
 
             final_ping_point = first_ping_point
             final_ping_distance = first_ping_distance
@@ -791,6 +841,7 @@ def run_simulation():
         "final_target_phase": final_target_phase,
         "final_drag_factor": final_drag_factor,
         "final_actual_drag": final_actual_drag,
+        "final_turn_rate": final_turn_rate,
 
         "final_ping_point": final_ping_point,
         "final_ping_distance": final_ping_distance,
@@ -865,6 +916,8 @@ if run_button:
                 f"Phase: {result['final_phase'][i]}<br>"
                 f"Speed: Mach {result['final_missile_mach'][i]:.2f}<br>"
                 f"Speed: {result['final_missile_ms'][i]:.0f} m/s<br>"
+                f"Max G: {missile_max_g:.1f}G<br>"
+                f"Turn rate: {result['final_turn_rate'][i]:.1f}°/s<br>"
                 f"Gravity: {'ON' if USE_GRAVITY else 'OFF'}<br>"
                 f"Base drag: {missile_drag_mach:.4f} Mach/sec<br>"
                 f"Altitude drag factor: {result['final_drag_factor'][i]:.2f}<br>"
