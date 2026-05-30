@@ -155,7 +155,6 @@ def lpi_detection_chance(distance_m, base_lpi):
 
 
 st.set_page_config(page_title="3D Missile Intercept Simulator", layout="wide")
-
 st.title("3D Missile Intercept Simulator")
 
 with st.sidebar:
@@ -178,9 +177,21 @@ with st.sidebar:
     new_target_climb = None
 
     if change_target_angle:
-        change_altitude = st.number_input("Altitude where target changes direction km", value=float(target_altitude), step=0.5)
-        new_target_heading = st.number_input("New target horizontal heading degrees", value=float(target_heading), step=5.0)
-        new_target_climb = st.number_input("New target climb/descent angle degrees", value=float(target_climb), step=1.0)
+        change_altitude = st.number_input(
+            "Altitude where target changes direction km",
+            value=float(target_altitude),
+            step=0.5
+        )
+        new_target_heading = st.number_input(
+            "New target horizontal heading degrees",
+            value=float(target_heading),
+            step=5.0
+        )
+        new_target_climb = st.number_input(
+            "New target climb/descent angle degrees",
+            value=float(target_climb),
+            step=1.0
+        )
 
     st.header("Target Notching")
     notch_mode = st.selectbox(
@@ -199,15 +210,28 @@ with st.sidebar:
 
     if notch_mode != 0:
         if notch_mode == 1:
-            notch_distance = st.number_input("Start notching when missile is this far away km", value=8.0, step=0.5)
+            notch_distance = st.number_input(
+                "Start notching when missile is this far away km",
+                value=8.0,
+                step=0.5
+            )
 
-        notch_vertical_angle = st.number_input("Target vertical angle while notching degrees", value=0.0, step=1.0)
+        notch_vertical_angle = st.number_input(
+            "Target vertical angle while notching degrees",
+            value=0.0,
+            step=1.0
+        )
         notch_vertical_angle = max(-60, min(60, notch_vertical_angle))
 
     st.header("Missile / Launch Properties")
-    missile_altitude = st.number_input("Missile / launch altitude km", value=float(target_altitude), step=0.5)
+    missile_altitude = st.number_input("Missile / launch aircraft altitude km", value=float(target_altitude), step=0.5)
     missile_mach_start = st.number_input("Missile speed Mach", value=4.0, step=0.1)
-    missile_drag_mach = st.number_input("Base missile drag Mach/sec at sea level", value=0.02, step=0.005, format="%.4f")
+    missile_drag_mach = st.number_input(
+        "Base missile drag Mach/sec at sea level",
+        value=0.02,
+        step=0.005,
+        format="%.4f"
+    )
     start_horizontal_range = st.number_input("Starting horizontal distance from target km", value=40.0, step=1.0)
     activation_range = st.number_input("Seeker activation range km", value=12.0, step=0.5)
 
@@ -223,8 +247,8 @@ with st.sidebar:
     st.header("Terminal Guidance")
     guidance_type = st.selectbox(
         "Terminal guidance type",
-        options=[1, 2],
-        format_func=lambda x: "1 = Pure Pursuit" if x == 1 else "2 = APN"
+        options=[2, 1],
+        format_func=lambda x: "2 = APN" if x == 2 else "1 = Pure Pursuit"
     )
 
     nav_constant = None
@@ -241,7 +265,13 @@ with st.sidebar:
     runs = 1
 
     if has_lpi:
-        lpi_value = st.number_input("Base LPI value", value=0.07, min_value=0.0, max_value=1.0, step=0.01)
+        lpi_value = st.number_input(
+            "Base LPI value",
+            value=0.07,
+            min_value=0.0,
+            max_value=1.0,
+            step=0.01
+        )
         runs = st.number_input("Simulation runs", value=1, min_value=1, max_value=200, step=1)
     else:
         runs = 1
@@ -257,19 +287,16 @@ def run_simulation():
     target_max_speed = target_max_mach * sound_speed
 
     all_hit_times = []
+
     all_first_ping_distances = []
     all_first_ping_times = []
     all_first_ping_points = []
 
     all_activation_times = []
     all_activation_distances = []
-    all_activation_points = []
 
     all_notch_times = []
-    all_notch_points = []
-
     all_angle_change_times = []
-    all_angle_change_points = []
 
     final_mx, final_my, final_mz = [], [], []
     final_tx, final_ty, final_tz = [], [], []
@@ -360,7 +387,6 @@ def run_simulation():
 
                 all_activation_times.append(time)
                 all_activation_distances.append(distance / 1000)
-                all_activation_points.append(activation_point)
 
                 if run == 0:
                     final_activation_point = activation_point
@@ -387,7 +413,6 @@ def run_simulation():
                     )
 
                     all_angle_change_times.append(time)
-                    all_angle_change_points.append(angle_change_point)
 
                     if run == 0:
                         final_angle_change_point = angle_change_point
@@ -419,7 +444,6 @@ def run_simulation():
                     )
 
                     all_notch_times.append(time)
-                    all_notch_points.append(notch_point)
 
                     if run == 0:
                         final_notch_point = notch_point
@@ -605,11 +629,6 @@ def run_simulation():
                 intercepted = True
                 all_hit_times.append(time)
 
-                if first_ping_distance is not None:
-                    all_first_ping_distances.append(first_ping_distance)
-                    all_first_ping_times.append(first_ping_time)
-                    all_first_ping_points.append(first_ping_point)
-
                 mx.append(missile_pos[0] / 1000)
                 my.append(missile_pos[1] / 1000)
                 mz.append(missile_pos[2] / 1000)
@@ -639,8 +658,6 @@ def run_simulation():
 
                 drag_factor_list.append(drag_factor)
                 actual_drag_list.append(actual_drag)
-
-                nonlocal_final = True
 
                 if run == 0:
                     final_intercepted = True
@@ -704,6 +721,11 @@ def run_simulation():
 
             time += DT
 
+        if first_ping_distance is not None:
+            all_first_ping_distances.append(first_ping_distance)
+            all_first_ping_times.append(first_ping_time)
+            all_first_ping_points.append(first_ping_point)
+
         if run == 0:
             final_mx, final_my, final_mz = mx, my, mz
             final_tx, final_ty, final_tz = tx, ty, tz
@@ -751,12 +773,14 @@ def run_simulation():
         "all_activation_distances": all_activation_distances,
         "all_notch_times": all_notch_times,
         "all_angle_change_times": all_angle_change_times,
+
         "final_mx": final_mx,
         "final_my": final_my,
         "final_mz": final_mz,
         "final_tx": final_tx,
         "final_ty": final_ty,
         "final_tz": final_tz,
+
         "final_time": final_time,
         "final_missile_mach": final_missile_mach,
         "final_target_mach": final_target_mach,
@@ -767,16 +791,20 @@ def run_simulation():
         "final_target_phase": final_target_phase,
         "final_drag_factor": final_drag_factor,
         "final_actual_drag": final_actual_drag,
+
         "final_ping_point": final_ping_point,
         "final_ping_distance": final_ping_distance,
         "final_ping_time": final_ping_time,
+
         "avg_ping_point": avg_ping_point,
         "avg_ping_distance": avg_ping_distance,
         "avg_ping_time": avg_ping_time,
+
         "final_activation_point": final_activation_point,
         "final_notch_point": final_notch_point,
         "final_angle_change_point": final_angle_change_point,
         "final_notch_side": final_notch_side,
+
         "final_intercepted": final_intercepted,
         "final_end_time": final_end_time,
         "final_end_distance": final_end_distance,
@@ -1011,7 +1039,7 @@ if run_button:
             hoverinfo="text"
         ))
 
-        if has_lpi and runs == 1 and result["final_ping_point"] is not None and result["final_ping_distance"] is not None:
+        if has_lpi and runs == 1 and result["final_ping_point"] is not None:
             p = result["final_ping_point"]
             fig.add_trace(go.Scatter3d(
                 x=[p[0]],
