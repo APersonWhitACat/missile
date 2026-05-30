@@ -192,6 +192,213 @@ def lpi_detection_chance(distance_m, base_lpi):
     return base_lpi + closeness * (1.0 - base_lpi)
 
 
+def make_animation_figure(result, frame_skip, play_speed_ms):
+    final_mx = result["final_mx"]
+    final_my = result["final_my"]
+    final_mz = result["final_mz"]
+    final_tx = result["final_tx"]
+    final_ty = result["final_ty"]
+    final_tz = result["final_tz"]
+    final_time = result["final_time"]
+
+    if not final_mx or not final_tx:
+        return None
+
+    frame_skip = max(1, int(frame_skip))
+    play_speed_ms = max(5, int(play_speed_ms))
+
+    indices = list(range(0, len(final_mx), frame_skip))
+    if indices[-1] != len(final_mx) - 1:
+        indices.append(len(final_mx) - 1)
+
+    all_x = final_mx + final_tx
+    all_y = final_my + final_ty
+    all_z = final_mz + final_tz
+
+    pad_x = max(1.0, (max(all_x) - min(all_x)) * 0.08)
+    pad_y = max(1.0, (max(all_y) - min(all_y)) * 0.08)
+    pad_z = max(1.0, (max(all_z) - min(all_z)) * 0.08)
+
+    x_range = [min(all_x) - pad_x, max(all_x) + pad_x]
+    y_range = [min(all_y) - pad_y, max(all_y) + pad_y]
+    z_range = [min(all_z) - pad_z, max(all_z) + pad_z]
+
+    start_i = indices[0]
+
+    fig_anim = go.Figure(
+        data=[
+            go.Scatter3d(
+                x=final_mx[:start_i + 1],
+                y=final_my[:start_i + 1],
+                z=final_mz[:start_i + 1],
+                mode="lines",
+                name="Missile trail",
+                line=dict(width=6)
+            ),
+            go.Scatter3d(
+                x=final_tx[:start_i + 1],
+                y=final_ty[:start_i + 1],
+                z=final_tz[:start_i + 1],
+                mode="lines",
+                name="Target trail",
+                line=dict(width=6)
+            ),
+            go.Scatter3d(
+                x=[final_mx[start_i]],
+                y=[final_my[start_i]],
+                z=[final_mz[start_i]],
+                mode="markers+text",
+                name="Missile",
+                text=["Missile"],
+                marker=dict(size=6),
+                hovertext=[f"Missile<br>Time: {final_time[start_i]:.2f}s"],
+                hoverinfo="text"
+            ),
+            go.Scatter3d(
+                x=[final_tx[start_i]],
+                y=[final_ty[start_i]],
+                z=[final_tz[start_i]],
+                mode="markers+text",
+                name="Target",
+                text=["Target"],
+                marker=dict(size=6),
+                hovertext=[f"Target<br>Time: {final_time[start_i]:.2f}s"],
+                hoverinfo="text"
+            ),
+        ]
+    )
+
+    frames = []
+
+    for i in indices:
+        frames.append(
+            go.Frame(
+                data=[
+                    go.Scatter3d(
+                        x=final_mx[:i + 1],
+                        y=final_my[:i + 1],
+                        z=final_mz[:i + 1],
+                        mode="lines",
+                        name="Missile trail",
+                        line=dict(width=6)
+                    ),
+                    go.Scatter3d(
+                        x=final_tx[:i + 1],
+                        y=final_ty[:i + 1],
+                        z=final_tz[:i + 1],
+                        mode="lines",
+                        name="Target trail",
+                        line=dict(width=6)
+                    ),
+                    go.Scatter3d(
+                        x=[final_mx[i]],
+                        y=[final_my[i]],
+                        z=[final_mz[i]],
+                        mode="markers+text",
+                        name="Missile",
+                        text=["Missile"],
+                        marker=dict(size=6),
+                        hovertext=[f"Missile<br>Time: {final_time[i]:.2f}s"],
+                        hoverinfo="text"
+                    ),
+                    go.Scatter3d(
+                        x=[final_tx[i]],
+                        y=[final_ty[i]],
+                        z=[final_tz[i]],
+                        mode="markers+text",
+                        name="Target",
+                        text=["Target"],
+                        marker=dict(size=6),
+                        hovertext=[f"Target<br>Time: {final_time[i]:.2f}s"],
+                        hoverinfo="text"
+                    ),
+                ],
+                name=str(i)
+            )
+        )
+
+    fig_anim.frames = frames
+
+    slider_steps = []
+
+    for i in indices:
+        slider_steps.append(
+            {
+                "args": [
+                    [str(i)],
+                    {
+                        "frame": {"duration": play_speed_ms, "redraw": True},
+                        "mode": "immediate",
+                        "transition": {"duration": 0}
+                    }
+                ],
+                "label": f"{final_time[i]:.1f}s",
+                "method": "animate"
+            }
+        )
+
+    fig_anim.update_layout(
+        title="Animated Playback",
+        scene=dict(
+            xaxis_title="X km",
+            yaxis_title="Y km",
+            zaxis_title="Altitude km",
+            xaxis=dict(range=x_range),
+            yaxis=dict(range=y_range),
+            zaxis=dict(range=z_range),
+            aspectmode="data"
+        ),
+        height=750,
+        updatemenus=[
+            {
+                "type": "buttons",
+                "showactive": False,
+                "x": 0.05,
+                "y": 0,
+                "xanchor": "left",
+                "yanchor": "top",
+                "buttons": [
+                    {
+                        "label": "Play",
+                        "method": "animate",
+                        "args": [
+                            None,
+                            {
+                                "frame": {"duration": play_speed_ms, "redraw": True},
+                                "fromcurrent": True,
+                                "transition": {"duration": 0},
+                                "mode": "immediate"
+                            }
+                        ]
+                    },
+                    {
+                        "label": "Pause",
+                        "method": "animate",
+                        "args": [
+                            [None],
+                            {
+                                "frame": {"duration": 0, "redraw": False},
+                                "mode": "immediate",
+                                "transition": {"duration": 0}
+                            }
+                        ]
+                    }
+                ]
+            }
+        ],
+        sliders=[
+            {
+                "active": 0,
+                "currentvalue": {"prefix": "Sim time: "},
+                "pad": {"t": 50},
+                "steps": slider_steps
+            }
+        ]
+    )
+
+    return fig_anim
+
+
 st.set_page_config(page_title="3D Missile Intercept Simulator", layout="wide")
 st.title("3D Missile Intercept Simulator")
 
@@ -302,7 +509,6 @@ with st.sidebar:
         loft_angle = st.number_input("Maximum missile loft angle degrees", value=25.0, step=1.0)
 
     st.header("Terminal Guidance")
-    guidance_type = 2
     st.write("Guidance: APN only")
 
     nav_constant = st.number_input("Navigation constant N", value=4.0, step=0.1)
@@ -325,6 +531,29 @@ with st.sidebar:
         runs = st.number_input("Simulation runs", value=1, min_value=1, max_value=200, step=1)
     else:
         runs = 1
+
+    st.header("Playback")
+    show_animation = st.checkbox("Show animated playback", value=False)
+
+    animation_frame_skip = 20
+    animation_speed_ms = 60
+
+    if show_animation:
+        animation_speed_ms = st.number_input(
+            "Playback speed ms per frame",
+            value=60,
+            min_value=5,
+            max_value=1000,
+            step=5
+        )
+
+        animation_frame_skip = st.number_input(
+            "Animation frame skip",
+            value=20,
+            min_value=1,
+            max_value=200,
+            step=1
+        )
 
     run_button = st.button("Run simulation", type="primary")
 
@@ -1208,6 +1437,20 @@ if run_button:
         )
 
         st.plotly_chart(fig, use_container_width=True)
+
+        if show_animation:
+            st.subheader("Animated Playback")
+
+            anim_fig = make_animation_figure(
+                result,
+                animation_frame_skip,
+                animation_speed_ms
+            )
+
+            if anim_fig is not None:
+                st.plotly_chart(anim_fig, use_container_width=True)
+            else:
+                st.write("Animation could not be created because there was no path data.")
 
 else:
     st.info("Set the values in the sidebar, then click Run simulation.")
