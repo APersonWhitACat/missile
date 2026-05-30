@@ -578,7 +578,7 @@ with st.sidebar:
         loft_angle = st.number_input("Maximum automatic loft angle degrees", value=25.0, step=1.0)
 
     st.header("Terminal Guidance")
-    st.write("Guidance: APN only")
+    st.write("Guidance: document-style APN")
 
     nav_constant = st.number_input("Navigation constant N", value=4.0, step=0.1)
     apn_gain = st.number_input("APN target acceleration gain", value=1.0, step=0.1)
@@ -663,6 +663,8 @@ def run_simulation():
     final_turn_rate = []
     final_thrust = []
     final_motor_accel = []
+    final_target_accel = []
+    final_target_accel_perp = []
 
     final_ping_point = None
     final_ping_distance = None
@@ -741,11 +743,14 @@ def run_simulation():
         turn_rate_list = []
         thrust_list = []
         motor_accel_list = []
+        target_accel_list = []
+        target_accel_perp_list = []
 
         while time <= MAX_TIME:
             prev_target_pos = target_pos[:]
             prev_missile_pos = missile_pos[:]
             prev_missile_vel = missile_vel[:]
+            prev_target_vel = target_vel[:]
 
             rel_pos = vec_sub(target_pos, missile_pos)
             distance = vec_mag(rel_pos)
@@ -903,6 +908,11 @@ def run_simulation():
             target_vel = vec_mul(current_target_dir, target_speed)
             target_pos = vec_add(target_pos, vec_mul(target_vel, DT))
 
+            actual_target_accel_vec = vec_mul(
+                vec_sub(target_vel, prev_target_vel),
+                1 / max(DT, 1e-9)
+            )
+
             rel_pos = vec_sub(target_pos, missile_pos)
             rel_vel = vec_sub(target_vel, missile_vel)
             distance = vec_mag(rel_pos)
@@ -947,8 +957,11 @@ def run_simulation():
                 phase = f"Auto loft aim {current_loft_angle:.1f}"
                 commanded_missile_vel = vec_mul(desired_dir, missile_speed)
 
+                target_accel_perp = [0, 0, 0]
+                target_accel_perp_mag = 0.0
+
             else:
-                phase = "APN"
+                phase = "Doc-style APN"
 
                 omega = vec_mul(
                     vec_cross(rel_pos, rel_vel),
@@ -959,7 +972,6 @@ def run_simulation():
                 closing_speed = max(closing_speed, 0)
 
                 los_unit = vec_norm(rel_pos)
-                target_accel_vec = vec_mul(current_target_dir, target_accel_ms)
 
                 pn_accel = vec_mul(
                     vec_cross(los_unit, omega),
@@ -968,13 +980,15 @@ def run_simulation():
 
                 target_accel_parallel = vec_mul(
                     los_unit,
-                    vec_dot(target_accel_vec, los_unit)
+                    vec_dot(actual_target_accel_vec, los_unit)
                 )
 
                 target_accel_perp = vec_sub(
-                    target_accel_vec,
+                    actual_target_accel_vec,
                     target_accel_parallel
                 )
+
+                target_accel_perp_mag = vec_mag(target_accel_perp)
 
                 apn_accel = vec_mul(
                     target_accel_perp,
@@ -1086,6 +1100,8 @@ def run_simulation():
                 turn_rate_list.append(actual_turn_rate)
                 thrust_list.append(current_thrust_n)
                 motor_accel_list.append(motor_accel_ms2)
+                target_accel_list.append(vec_mag(actual_target_accel_vec))
+                target_accel_perp_list.append(target_accel_perp_mag)
 
                 if run == 0:
                     final_intercepted = True
@@ -1152,6 +1168,8 @@ def run_simulation():
             turn_rate_list.append(actual_turn_rate)
             thrust_list.append(current_thrust_n)
             motor_accel_list.append(motor_accel_ms2)
+            target_accel_list.append(vec_mag(actual_target_accel_vec))
+            target_accel_perp_list.append(target_accel_perp_mag)
 
             time += DT
 
@@ -1177,6 +1195,8 @@ def run_simulation():
             final_turn_rate = turn_rate_list
             final_thrust = thrust_list
             final_motor_accel = motor_accel_list
+            final_target_accel = target_accel_list
+            final_target_accel_perp = target_accel_perp_list
 
             final_ping_point = first_ping_point
             final_ping_distance = first_ping_distance
@@ -1238,6 +1258,8 @@ def run_simulation():
         "final_turn_rate": final_turn_rate,
         "final_thrust": final_thrust,
         "final_motor_accel": final_motor_accel,
+        "final_target_accel": final_target_accel,
+        "final_target_accel_perp": final_target_accel_perp,
 
         "final_ping_point": final_ping_point,
         "final_ping_distance": final_ping_distance,
@@ -1330,6 +1352,8 @@ if run_button:
                 f"Launch platform Mach: {launch_platform_mach:.2f}<br>"
                 f"Motor thrust: {result['final_thrust'][i]:.0f} N<br>"
                 f"Motor accel: {result['final_motor_accel'][i]:.1f} m/s²<br>"
+                f"Target accel used by APN: {result['final_target_accel'][i]:.1f} m/s²<br>"
+                f"Target accel perpendicular to LOS: {result['final_target_accel_perp'][i]:.1f} m/s²<br>"
                 f"Missile mass: {missile_mass_kg:.1f} kg<br>"
                 f"Max G: {missile_max_g:.1f}G<br>"
                 f"Turn rate: {result['final_turn_rate'][i]:.1f}°/s<br>"
@@ -1353,6 +1377,8 @@ if run_button:
                 f"Speed: Mach {result['final_target_mach'][i]:.2f}<br>"
                 f"Speed: {result['final_target_ms'][i]:.0f} m/s<br>"
                 f"Target heading input: {target_heading:.1f}° relative<br>"
+                f"Target accel: {result['final_target_accel'][i]:.1f} m/s²<br>"
+                f"Target accel perpendicular to LOS: {result['final_target_accel_perp'][i]:.1f} m/s²<br>"
                 f"Max speed: Mach {target_max_mach:.2f}<br>"
                 f"Turn rate setting: {target_turn_rate_deg:.1f}°/s<br>"
                 f"True 3D distance to missile: {result['final_distance'][i]:.2f} km<br>"
@@ -1361,7 +1387,7 @@ if run_button:
                 f"Alt: {final_tz[i]:.2f} km"
             )
 
-        terminal_name = f"APN, N={nav_constant}"
+        terminal_name = f"Document-style APN, N={nav_constant}"
         guidance_name = f"Auto loft aim {loft_angle}° + {terminal_name}" if use_loft else terminal_name
 
         fig.add_trace(go.Scatter3d(
