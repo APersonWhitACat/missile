@@ -54,15 +54,54 @@ def vec_norm(a):
     return [a[0] / m, a[1] / m, a[2] / m]
 
 
-def direction_3d(horizontal_deg, vertical_deg):
-    h = math.radians(horizontal_deg)
+def horizontal_norm(v):
+    h = [v[0], v[1], 0]
+    return vec_norm(h)
+
+
+def relative_direction_from_line(base_forward, horizontal_relative_deg, vertical_deg):
+    forward = horizontal_norm(base_forward)
+
+    if vec_mag(forward) < 1e-9:
+        forward = [0, 1, 0]
+
+    right = [forward[1], -forward[0], 0]
+
+    h = math.radians(horizontal_relative_deg)
     v = math.radians(vertical_deg)
 
-    return [
-        math.cos(v) * math.cos(h),
-        math.cos(v) * math.sin(h),
+    horizontal_dir = vec_add(
+        vec_mul(forward, math.cos(h)),
+        vec_mul(right, math.sin(h))
+    )
+
+    horizontal_dir = vec_norm(horizontal_dir)
+
+    return vec_norm([
+        horizontal_dir[0] * math.cos(v),
+        horizontal_dir[1] * math.cos(v),
         math.sin(v)
-    ]
+    ])
+
+
+def target_relative_direction(target_pos, missile_pos, heading_relative_deg, vertical_deg):
+    away_from_missile = vec_sub(target_pos, missile_pos)
+
+    return relative_direction_from_line(
+        away_from_missile,
+        heading_relative_deg,
+        vertical_deg
+    )
+
+
+def manual_launch_direction(missile_pos, target_pos, horizontal_offset_deg, vertical_angle_deg):
+    toward_target = vec_sub(target_pos, missile_pos)
+
+    return relative_direction_from_line(
+        toward_target,
+        horizontal_offset_deg,
+        vertical_angle_deg
+    )
 
 
 def altitude_drag_factor(alt_km):
@@ -408,8 +447,18 @@ with st.sidebar:
     target_mach_start = st.number_input("Target speed Mach", value=1.0, step=0.1)
     target_accel_mach = st.number_input("Target acceleration Mach/sec", value=0.0, step=0.01)
     target_max_mach = st.number_input("Target maximum speed Mach", value=float(target_mach_start), step=0.1)
-    target_heading = st.number_input("Target horizontal heading degrees", value=0.0, step=5.0)
-    target_climb = st.number_input("Target climb/descent angle degrees", value=0.0, step=1.0)
+
+    target_heading = st.number_input(
+        "Target heading relative to missile degrees, 0=away, 180=toward, 90=right, -90=left",
+        value=0.0,
+        step=5.0
+    )
+
+    target_climb = st.number_input(
+        "Target vertical angle degrees, +up / -down",
+        value=0.0,
+        step=1.0
+    )
 
     target_turn_rate_deg = st.number_input(
         "Target turn rate deg/sec",
@@ -434,13 +483,15 @@ with st.sidebar:
             value=float(target_altitude),
             step=0.5
         )
+
         new_target_heading = st.number_input(
-            "New target horizontal heading degrees",
+            "New target heading relative to missile degrees, 0=away, 180=toward, 90=right, -90=left",
             value=float(target_heading),
             step=5.0
         )
+
         new_target_climb = st.number_input(
-            "New target climb/descent angle degrees",
+            "New target vertical angle degrees, +up / -down",
             value=float(target_climb),
             step=1.0
         )
@@ -469,7 +520,7 @@ with st.sidebar:
             )
 
         notch_vertical_angle = st.number_input(
-            "Target vertical angle while notching degrees",
+            "Target vertical angle while notching degrees, +up / -down",
             value=0.0,
             step=1.0
         )
@@ -478,6 +529,24 @@ with st.sidebar:
     st.header("Missile / Launch Platform")
     missile_altitude = st.number_input("Launch platform altitude km", value=float(target_altitude), step=0.5)
     launch_platform_mach = st.number_input("Launch platform speed Mach", value=1.2, step=0.1)
+
+    use_manual_launch = st.checkbox("Use manual launch direction", value=False)
+
+    launch_horizontal_offset_deg = 0.0
+    launch_vertical_angle_deg = 0.0
+
+    if use_manual_launch:
+        launch_horizontal_offset_deg = st.number_input(
+            "Launch horizontal offset degrees, 0=toward target, 90=right, -90=left",
+            value=0.0,
+            step=5.0
+        )
+
+        launch_vertical_angle_deg = st.number_input(
+            "Launch vertical angle degrees, +up / -down",
+            value=20.0,
+            step=5.0
+        )
 
     missile_mass_kg = st.number_input("Missile mass kg", value=168.0, min_value=1.0, step=1.0)
 
@@ -500,13 +569,13 @@ with st.sidebar:
     activation_range = st.number_input("Seeker activation range km", value=12.0, step=0.5)
 
     st.header("Lofting")
-    use_loft = st.checkbox("Use lofting before seeker range", value=False)
+    use_loft = st.checkbox("Use automatic lofting before seeker range", value=False)
 
     loft_angle = 0.0
     loft_strength = 2.5
 
     if use_loft:
-        loft_angle = st.number_input("Maximum missile loft angle degrees", value=25.0, step=1.0)
+        loft_angle = st.number_input("Maximum automatic loft angle degrees", value=25.0, step=1.0)
 
     st.header("Terminal Guidance")
     st.write("Guidance: APN only")
@@ -619,10 +688,25 @@ def run_simulation():
         target_pos = [0, 0, target_altitude * 1000]
         missile_pos = [0, -start_horizontal_range * 1000, missile_altitude * 1000]
 
-        current_target_dir = direction_3d(target_heading, target_climb)
+        current_target_dir = target_relative_direction(
+            target_pos,
+            missile_pos,
+            target_heading,
+            target_climb
+        )
+
         target_vel = vec_mul(current_target_dir, target_speed)
 
-        missile_dir = vec_norm(vec_sub(target_pos, missile_pos))
+        if use_manual_launch:
+            missile_dir = manual_launch_direction(
+                missile_pos,
+                target_pos,
+                launch_horizontal_offset_deg,
+                launch_vertical_angle_deg
+            )
+        else:
+            missile_dir = vec_norm(vec_sub(target_pos, missile_pos))
+
         missile_vel = vec_mul(missile_dir, missile_speed)
 
         time = 0
@@ -694,7 +778,12 @@ def run_simulation():
                     should_change = True
 
                 if should_change:
-                    desired_target_dir = direction_3d(new_target_heading, new_target_climb)
+                    desired_target_dir = target_relative_direction(
+                        target_pos,
+                        missile_pos,
+                        new_target_heading,
+                        new_target_climb
+                    )
 
                     current_target_dir = turn_toward_direction(
                         current_target_dir,
@@ -855,7 +944,7 @@ def run_simulation():
                     max(horizontal_distance, 1)
                 ))
 
-                phase = f"Loft aim {current_loft_angle:.1f}"
+                phase = f"Auto loft aim {current_loft_angle:.1f}"
                 commanded_missile_vel = vec_mul(desired_dir, missile_speed)
 
             else:
@@ -1098,9 +1187,6 @@ def run_simulation():
                 if distance_list:
                     final_end_time = time_list[-1]
                     final_end_distance = distance_list[-1]
-
-                    if final_activation_time is not None:
-                        final_activation_to_intercept_time = None
                 else:
                     final_end_time = time
                     final_end_distance = None
@@ -1226,12 +1312,21 @@ if run_button:
         missile_hover = []
 
         for i in range(len(final_mx)):
+            manual_launch_text = "No"
+            if use_manual_launch:
+                manual_launch_text = (
+                    f"Yes<br>"
+                    f"Launch horizontal offset: {launch_horizontal_offset_deg:.1f}°<br>"
+                    f"Launch vertical angle: {launch_vertical_angle_deg:.1f}°"
+                )
+
             missile_hover.append(
                 f"Missile<br>"
                 f"Time: {result['final_time'][i]:.2f}s<br>"
                 f"Phase: {result['final_phase'][i]}<br>"
                 f"Speed: Mach {result['final_missile_mach'][i]:.2f}<br>"
                 f"Speed: {result['final_missile_ms'][i]:.0f} m/s<br>"
+                f"Manual launch: {manual_launch_text}<br>"
                 f"Launch platform Mach: {launch_platform_mach:.2f}<br>"
                 f"Motor thrust: {result['final_thrust'][i]:.0f} N<br>"
                 f"Motor accel: {result['final_motor_accel'][i]:.1f} m/s²<br>"
@@ -1257,6 +1352,7 @@ if run_button:
                 f"Phase: {result['final_target_phase'][i]}<br>"
                 f"Speed: Mach {result['final_target_mach'][i]:.2f}<br>"
                 f"Speed: {result['final_target_ms'][i]:.0f} m/s<br>"
+                f"Target heading input: {target_heading:.1f}° relative<br>"
                 f"Max speed: Mach {target_max_mach:.2f}<br>"
                 f"Turn rate setting: {target_turn_rate_deg:.1f}°/s<br>"
                 f"True 3D distance to missile: {result['final_distance'][i]:.2f} km<br>"
@@ -1266,7 +1362,7 @@ if run_button:
             )
 
         terminal_name = f"APN, N={nav_constant}"
-        guidance_name = f"Loft aim {loft_angle}° + {terminal_name}" if use_loft else terminal_name
+        guidance_name = f"Auto loft aim {loft_angle}° + {terminal_name}" if use_loft else terminal_name
 
         fig.add_trace(go.Scatter3d(
             x=final_mx,
@@ -1290,6 +1386,24 @@ if run_button:
             hoverinfo="text"
         ))
 
+        launch_hover = [
+            f"Missile launch<br>"
+            f"Launch platform Mach: {launch_platform_mach:.2f}<br>"
+            f"Starting horizontal range: {start_horizontal_range:.2f} km<br>"
+            f"Alt: {missile_altitude:.2f} km"
+        ]
+
+        if use_manual_launch:
+            launch_hover = [
+                f"Missile launch<br>"
+                f"Manual launch direction: Yes<br>"
+                f"Horizontal offset: {launch_horizontal_offset_deg:.1f}°<br>"
+                f"Vertical angle: {launch_vertical_angle_deg:.1f}°<br>"
+                f"Launch platform Mach: {launch_platform_mach:.2f}<br>"
+                f"Starting horizontal range: {start_horizontal_range:.2f} km<br>"
+                f"Alt: {missile_altitude:.2f} km"
+            ]
+
         fig.add_trace(go.Scatter3d(
             x=[final_mx[0]],
             y=[final_my[0]],
@@ -1298,12 +1412,7 @@ if run_button:
             name="Missile launch",
             text=["Missile launch"],
             marker=dict(size=6),
-            hovertext=[
-                f"Missile launch<br>"
-                f"Launch platform Mach: {launch_platform_mach:.2f}<br>"
-                f"Starting horizontal range: {start_horizontal_range:.2f} km<br>"
-                f"Alt: {missile_altitude:.2f} km"
-            ],
+            hovertext=launch_hover,
             hoverinfo="text"
         ))
 
@@ -1317,6 +1426,8 @@ if run_button:
             marker=dict(size=6),
             hovertext=[
                 f"Target start<br>"
+                f"Target heading: {target_heading:.1f}° relative<br>"
+                f"0° = away, 180° = toward, 90° = right, -90° = left<br>"
                 f"Mach {target_mach_start:.2f}<br>"
                 f"Max Mach {target_max_mach:.2f}<br>"
                 f"Turn rate: {target_turn_rate_deg:.1f}°/s<br>"
@@ -1376,8 +1487,8 @@ if run_button:
                 hovertext=[
                     f"Target direction change<br>"
                     f"Changed at altitude: {change_altitude:.2f} km<br>"
-                    f"New heading: {new_target_heading:.2f}°<br>"
-                    f"New climb angle: {new_target_climb:.2f}°<br>"
+                    f"New heading relative: {new_target_heading:.2f}°<br>"
+                    f"New vertical angle: {new_target_climb:.2f}°<br>"
                     f"Turn rate: {target_turn_rate_deg:.1f}°/s"
                 ],
                 hoverinfo="text"
