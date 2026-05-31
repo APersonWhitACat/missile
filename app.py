@@ -18,10 +18,7 @@ GRAVITY = 9.81
 
 NOTCH_BREAK_TIME = 1.2
 
-REFERENCE_MACH_FOR_DRAG = 3.0
-MACH_DRAG_EXPONENT = 2.3
-
-DRAG_REFERENCE_MASS_KG = 168.0
+SEA_LEVEL_DENSITY = 1.225
 
 
 def vec_add(a, b):
@@ -99,11 +96,6 @@ def manual_launch_direction(missile_pos, target_pos, horizontal_offset_deg, vert
 
 
 def air_density_factor(alt_km):
-    # Dev/game-style air density factor.
-    # alt_km is converted to meters.
-    # 0 km = 1.0
-    # higher altitude = less air = less drag
-    # above 40 km = 0 air density
     altitude_m = max(0.0, alt_km * 1000.0)
 
     if altitude_m > 40000:
@@ -114,40 +106,29 @@ def air_density_factor(alt_km):
     return max(0.0, density_factor)
 
 
-def mach_drag_factor(mach):
-    mach = max(0.0, mach)
-    reference_mach = max(REFERENCE_MACH_FOR_DRAG, 0.1)
+def air_density_kg_m3(alt_km):
+    return SEA_LEVEL_DENSITY * air_density_factor(alt_km)
 
-    if mach <= 0:
+
+def frontal_area_m2(diameter_m):
+    radius = max(0.001, diameter_m / 2.0)
+    return math.pi * radius * radius
+
+
+def drag_force_newtons(speed_ms, alt_km, diameter_m, cd):
+    rho = air_density_kg_m3(alt_km)
+    area = frontal_area_m2(diameter_m)
+
+    return 0.5 * rho * speed_ms * speed_ms * cd * area
+
+
+def turn_drag_force_newtons(base_drag_force, turn_rate_deg_s, turn_drag_multiplier):
+    if turn_drag_multiplier <= 0:
         return 0.0
-
-    return max(0.15, (mach / reference_mach) ** MACH_DRAG_EXPONENT)
-
-
-def mass_drag_factor(current_mass_kg):
-    current_mass_kg = max(current_mass_kg, 1.0)
-    return DRAG_REFERENCE_MASS_KG / current_mass_kg
-
-
-def missile_drag_per_second(drag_strength, alt_km, mach, current_mass_kg):
-    density = air_density_factor(alt_km)
-    mach_factor = mach_drag_factor(mach)
-    mass_factor = mass_drag_factor(current_mass_kg)
-
-    return drag_strength * density * mach_factor * mass_factor
-
-
-def turn_drag_per_second(turn_drag_strength, turn_rate_deg_s, alt_km, mach, current_mass_kg):
-    if turn_drag_strength <= 0:
-        return 0.0
-
-    density = air_density_factor(alt_km)
-    mach_factor = mach_drag_factor(mach)
-    mass_factor = mass_drag_factor(current_mass_kg)
 
     turn_factor = (max(0.0, turn_rate_deg_s) / 100.0) ** 2
 
-    return turn_drag_strength * turn_factor * density * mach_factor * mass_factor
+    return base_drag_force * turn_drag_multiplier * turn_factor
 
 
 def closest_distance_between_steps(prev_target, prev_missile, new_target, new_missile):
@@ -688,25 +669,34 @@ with st.sidebar:
 
     st.header("Missile Drag")
 
-    missile_drag_strength = st.number_input(
-        "Missile drag strength",
-        value=0.010,
-        min_value=0.0,
-        step=0.005,
-        format="%.4f",
-        help="Higher = missile slows down faster. Drag is affected by speed, altitude, and missile mass."
-    )
-
-    turn_drag_strength = st.number_input(
-        "Turn drag strength",
-        value=0.004,
-        min_value=0.0,
+    missile_diameter_m = st.number_input(
+        "Missile diameter m",
+        value=0.178,
+        min_value=0.01,
         step=0.001,
-        format="%.4f",
-        help="Extra speed loss while the missile turns. 0 disables turn drag."
+        format="%.3f",
+        help="Body diameter of the missile. AIM-120 / Meteor style missiles are around 0.178 m."
     )
 
-    st.caption("Drag uses dev-style air density: less air at altitude, 0 air above 40 km.")
+    drag_coefficient_cd = st.number_input(
+        "Drag coefficient Cd",
+        value=0.45,
+        min_value=0.01,
+        step=0.05,
+        format="%.2f",
+        help="Higher = more drag. Use this as the main tuning value."
+    )
+
+    turn_drag_multiplier = st.number_input(
+        "Turn drag multiplier",
+        value=1.0,
+        min_value=0.0,
+        step=0.1,
+        format="%.2f",
+        help="Extra drag while turning. 0 disables turn drag."
+    )
+
+    st.caption("Drag uses force: air density × speed² × Cd × frontal area. No Mach/sec drag.")
 
     start_horizontal_range = st.number_input("Starting horizontal distance from target km", value=40.0, step=1.0)
     activation_range = st.number_input("Seeker activation range km", value=12.0, step=0.5)
@@ -822,12 +812,12 @@ def run_simulation():
     final_distance = []
     final_phase = []
     final_target_phase = []
-    final_air_density = []
-    final_mach_drag_factor = []
-    final_mass_drag_factor = []
-    final_aero_drag = []
-    final_turn_drag = []
-    final_actual_drag = []
+    final_air_density_factor = []
+    final_air_density_kg_m3 = []
+    final_aero_drag_force = []
+    final_turn_drag_force = []
+    final_total_drag_force = []
+    final_drag_accel = []
     final_turn_rate = []
     final_thrust = []
     final_motor_accel = []
@@ -911,12 +901,12 @@ def run_simulation():
         distance_list = []
         phase_list = []
         target_phase_list = []
-        air_density_list = []
-        mach_drag_factor_list = []
-        mass_drag_factor_list = []
-        aero_drag_list = []
-        turn_drag_list = []
-        actual_drag_list = []
+        air_density_factor_list = []
+        air_density_kg_m3_list = []
+        aero_drag_force_list = []
+        turn_drag_force_list = []
+        total_drag_force_list = []
+        drag_accel_list = []
         turn_rate_list = []
         thrust_list = []
         motor_accel_list = []
@@ -1258,29 +1248,27 @@ def run_simulation():
             missile_mach = missile_speed / sound_speed
 
             missile_alt_km = missile_pos[2] / 1000
-            current_air_density = air_density_factor(missile_alt_km)
-            current_mach_drag_factor = mach_drag_factor(missile_mach)
-            current_mass_drag_factor = mass_drag_factor(current_mass_kg)
+            current_air_density_factor = air_density_factor(missile_alt_km)
+            current_air_density_kg_m3 = air_density_kg_m3(missile_alt_km)
 
-            aero_drag = missile_drag_per_second(
-                missile_drag_strength,
+            base_drag_force = drag_force_newtons(
+                missile_speed,
                 missile_alt_km,
-                missile_mach,
-                current_mass_kg
+                missile_diameter_m,
+                drag_coefficient_cd
             )
 
-            turn_drag = turn_drag_per_second(
-                turn_drag_strength,
+            extra_turn_drag_force = turn_drag_force_newtons(
+                base_drag_force,
                 actual_turn_rate,
-                missile_alt_km,
-                missile_mach,
-                current_mass_kg
+                turn_drag_multiplier
             )
 
-            actual_drag = aero_drag + turn_drag
+            total_drag_force = base_drag_force + extra_turn_drag_force
+            drag_accel_ms2 = total_drag_force / max(current_mass_kg, 1.0)
 
-            missile_mach = max(0, missile_mach - actual_drag * DT)
-            missile_speed = missile_mach * sound_speed
+            missile_speed = max(0.0, missile_speed - drag_accel_ms2 * DT)
+            missile_mach = missile_speed / sound_speed
 
             missile_vel = vec_mul(vec_norm(missile_vel), missile_speed)
             missile_pos = vec_add(missile_pos, vec_mul(missile_vel, DT))
@@ -1329,12 +1317,12 @@ def run_simulation():
                 else:
                     target_phase_list.append("Normal")
 
-                air_density_list.append(current_air_density)
-                mach_drag_factor_list.append(current_mach_drag_factor)
-                mass_drag_factor_list.append(current_mass_drag_factor)
-                aero_drag_list.append(aero_drag)
-                turn_drag_list.append(turn_drag)
-                actual_drag_list.append(actual_drag)
+                air_density_factor_list.append(current_air_density_factor)
+                air_density_kg_m3_list.append(current_air_density_kg_m3)
+                aero_drag_force_list.append(base_drag_force)
+                turn_drag_force_list.append(extra_turn_drag_force)
+                total_drag_force_list.append(total_drag_force)
+                drag_accel_list.append(drag_accel_ms2)
                 turn_rate_list.append(actual_turn_rate)
                 thrust_list.append(current_thrust_n)
                 motor_accel_list.append(motor_accel_ms2)
@@ -1403,12 +1391,12 @@ def run_simulation():
             else:
                 target_phase_list.append("Normal")
 
-            air_density_list.append(current_air_density)
-            mach_drag_factor_list.append(current_mach_drag_factor)
-            mass_drag_factor_list.append(current_mass_drag_factor)
-            aero_drag_list.append(aero_drag)
-            turn_drag_list.append(turn_drag)
-            actual_drag_list.append(actual_drag)
+            air_density_factor_list.append(current_air_density_factor)
+            air_density_kg_m3_list.append(current_air_density_kg_m3)
+            aero_drag_force_list.append(base_drag_force)
+            turn_drag_force_list.append(extra_turn_drag_force)
+            total_drag_force_list.append(total_drag_force)
+            drag_accel_list.append(drag_accel_ms2)
             turn_rate_list.append(actual_turn_rate)
             thrust_list.append(current_thrust_n)
             motor_accel_list.append(motor_accel_ms2)
@@ -1436,12 +1424,12 @@ def run_simulation():
             final_distance = distance_list
             final_phase = phase_list
             final_target_phase = target_phase_list
-            final_air_density = air_density_list
-            final_mach_drag_factor = mach_drag_factor_list
-            final_mass_drag_factor = mass_drag_factor_list
-            final_aero_drag = aero_drag_list
-            final_turn_drag = turn_drag_list
-            final_actual_drag = actual_drag_list
+            final_air_density_factor = air_density_factor_list
+            final_air_density_kg_m3 = air_density_kg_m3_list
+            final_aero_drag_force = aero_drag_force_list
+            final_turn_drag_force = turn_drag_force_list
+            final_total_drag_force = total_drag_force_list
+            final_drag_accel = drag_accel_list
             final_turn_rate = turn_rate_list
             final_thrust = thrust_list
             final_motor_accel = motor_accel_list
@@ -1505,12 +1493,12 @@ def run_simulation():
         "final_distance": final_distance,
         "final_phase": final_phase,
         "final_target_phase": final_target_phase,
-        "final_air_density": final_air_density,
-        "final_mach_drag_factor": final_mach_drag_factor,
-        "final_mass_drag_factor": final_mass_drag_factor,
-        "final_aero_drag": final_aero_drag,
-        "final_turn_drag": final_turn_drag,
-        "final_actual_drag": final_actual_drag,
+        "final_air_density_factor": final_air_density_factor,
+        "final_air_density_kg_m3": final_air_density_kg_m3,
+        "final_aero_drag_force": final_aero_drag_force,
+        "final_turn_drag_force": final_turn_drag_force,
+        "final_total_drag_force": final_total_drag_force,
+        "final_drag_accel": final_drag_accel,
         "final_turn_rate": final_turn_rate,
         "final_thrust": final_thrust,
         "final_motor_accel": final_motor_accel,
@@ -1564,8 +1552,9 @@ if run_button:
 
     st.write(f"Fuel mass: **{result['total_fuel_kg']:.2f} kg**")
     st.write(f"Dry mass: **{result['dry_mass_kg']:.2f} kg**")
-    st.write(f"Aero drag strength: **{missile_drag_strength:.4f}**")
-    st.write(f"Turn drag strength: **{turn_drag_strength:.4f}**")
+    st.write(f"Missile diameter: **{missile_diameter_m:.3f} m**")
+    st.write(f"Drag coefficient Cd: **{drag_coefficient_cd:.2f}**")
+    st.write(f"Turn drag multiplier: **{turn_drag_multiplier:.2f}x**")
 
     if notch_mode != 0:
         if result["all_notch_times"]:
@@ -1610,16 +1599,16 @@ if run_button:
                 f"m/s: {result['final_missile_ms'][i]:.0f}<br>"
                 f"Mass: {result['final_current_mass'][i]:.1f} kg<br>"
                 f"Fuel: {result['final_remaining_fuel'][i]:.1f} kg<br>"
-                f"Mass drag: {result['final_mass_drag_factor'][i]:.2f}x<br>"
                 f"Thrust: {result['final_thrust'][i]:.0f} N<br>"
-                f"Accel: {result['final_motor_accel'][i]:.1f} m/s²<br>"
+                f"Motor accel: {result['final_motor_accel'][i]:.1f} m/s²<br>"
                 f"G limit: {missile_max_g:.1f}<br>"
                 f"Turn: {result['final_turn_rate'][i]:.1f}°/s<br>"
-                f"Aero drag: {result['final_aero_drag'][i]:.4f} M/s<br>"
-                f"Turn drag: {result['final_turn_drag'][i]:.4f} M/s<br>"
-                f"Total drag: {result['final_actual_drag'][i]:.4f} M/s<br>"
-                f"Air: {result['final_air_density'][i]:.3f}<br>"
-                f"Mach drag: {result['final_mach_drag_factor'][i]:.3f}<br>"
+                f"Aero drag: {result['final_aero_drag_force'][i]:.0f} N<br>"
+                f"Turn drag: {result['final_turn_drag_force'][i]:.0f} N<br>"
+                f"Total drag: {result['final_total_drag_force'][i]:.0f} N<br>"
+                f"Drag accel: {result['final_drag_accel'][i]:.1f} m/s²<br>"
+                f"Air factor: {result['final_air_density_factor'][i]:.3f}<br>"
+                f"Air kg/m³: {result['final_air_density_kg_m3'][i]:.3f}<br>"
                 f"Dist: {result['final_distance'][i]:.2f} km<br>"
                 f"X/Y/Z: {final_mx[i]:.2f}, {final_my[i]:.2f}, {final_mz[i]:.2f} km"
             )
@@ -1675,8 +1664,9 @@ if run_button:
             f"Mass: {missile_mass_kg:.1f} kg<br>"
             f"Dry: {result['dry_mass_kg']:.1f} kg<br>"
             f"Fuel: {result['total_fuel_kg']:.1f} kg<br>"
-            f"Aero drag: {missile_drag_strength:.4f}<br>"
-            f"Turn drag: {turn_drag_strength:.4f}"
+            f"Diameter: {missile_diameter_m:.3f} m<br>"
+            f"Cd: {drag_coefficient_cd:.2f}<br>"
+            f"Turn drag: {turn_drag_multiplier:.2f}x"
         ]
 
         if use_manual_launch:
@@ -1690,8 +1680,9 @@ if run_button:
                 f"Mass: {missile_mass_kg:.1f} kg<br>"
                 f"Dry: {result['dry_mass_kg']:.1f} kg<br>"
                 f"Fuel: {result['total_fuel_kg']:.1f} kg<br>"
-                f"Aero drag: {missile_drag_strength:.4f}<br>"
-                f"Turn drag: {turn_drag_strength:.4f}"
+                f"Diameter: {missile_diameter_m:.3f} m<br>"
+                f"Cd: {drag_coefficient_cd:.2f}<br>"
+                f"Turn drag: {turn_drag_multiplier:.2f}x"
             ]
 
         fig.add_trace(go.Scatter3d(
