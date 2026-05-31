@@ -89,26 +89,48 @@ def relative_direction_from_line(base_forward, horizontal_relative_deg, vertical
 
 def target_relative_direction(target_pos, missile_pos, heading_relative_deg, vertical_deg):
     away_from_missile = vec_sub(target_pos, missile_pos)
-
-    return relative_direction_from_line(
-        away_from_missile,
-        heading_relative_deg,
-        vertical_deg
-    )
+    return relative_direction_from_line(away_from_missile, heading_relative_deg, vertical_deg)
 
 
 def manual_launch_direction(missile_pos, target_pos, horizontal_offset_deg, vertical_angle_deg):
     toward_target = vec_sub(target_pos, missile_pos)
+    return relative_direction_from_line(toward_target, horizontal_offset_deg, vertical_angle_deg)
 
-    return relative_direction_from_line(
-        toward_target,
-        horizontal_offset_deg,
-        vertical_angle_deg
-    )
+
+def smoothstep(edge0, edge1, x):
+    if edge0 == edge1:
+        return 1.0 if x >= edge1 else 0.0
+
+    t = (x - edge0) / (edge1 - edge0)
+    t = max(0.0, min(1.0, t))
+
+    return t * t * (3.0 - 2.0 * t)
 
 
 def air_density_factor(alt_km):
-    return max(0.05, math.exp(-max(0.0, alt_km) / 9.0))
+    alt_km = max(0.0, alt_km)
+
+    realistic_density = math.exp(-alt_km / 8.5)
+
+    low_altitude_boost = 1.0 + 0.5 * max(0.0, 1.0 - alt_km / 55.0)
+    boosted_density = realistic_density * low_altitude_boost
+
+    old_high_alt_drag_level = 0.05
+
+    blend_to_45km_level = smoothstep(32.0, 45.0, alt_km)
+    leave_45km_level = smoothstep(45.0, 85.0, alt_km)
+
+    density_up_to_45 = (
+        boosted_density * (1.0 - blend_to_45km_level)
+        + old_high_alt_drag_level * blend_to_45km_level
+    )
+
+    final_density = (
+        density_up_to_45 * (1.0 - leave_45km_level)
+        + realistic_density * leave_45km_level
+    )
+
+    return max(0.0, final_density)
 
 
 def mach_drag_factor(mach):
@@ -126,6 +148,18 @@ def missile_drag_per_second(drag_strength, alt_km, mach):
     mach_factor = mach_drag_factor(mach)
 
     return drag_strength * density * mach_factor
+
+
+def turn_drag_per_second(turn_drag_strength, turn_rate_deg_s, alt_km, mach):
+    if turn_drag_strength <= 0:
+        return 0.0
+
+    density = air_density_factor(alt_km)
+    mach_factor = mach_drag_factor(mach)
+
+    turn_factor = (max(0.0, turn_rate_deg_s) / 100.0) ** 2
+
+    return turn_drag_strength * turn_factor * density * mach_factor
 
 
 def closest_distance_between_steps(prev_target, prev_missile, new_target, new_missile):
@@ -657,10 +691,10 @@ with st.sidebar:
         sustainer_burn_time
     )
 
-    st.caption(f"Estimated/used fuel mass: {displayed_total_fuel:.1f} kg")
-    st.caption(f"Dry mass after fuel is gone: {displayed_dry_mass:.1f} kg")
-    st.caption(f"Booster fuel share: {displayed_booster_fuel:.1f} kg")
-    st.caption(f"Sustainer fuel share: {displayed_sustainer_fuel:.1f} kg")
+    st.caption(f"Fuel mass: {displayed_total_fuel:.1f} kg")
+    st.caption(f"Dry mass: {displayed_dry_mass:.1f} kg")
+    st.caption(f"Booster fuel: {displayed_booster_fuel:.1f} kg")
+    st.caption(f"Sustainer fuel: {displayed_sustainer_fuel:.1f} kg")
 
     missile_max_g = st.number_input("Missile max G", value=40.0, min_value=1.0, step=1.0)
 
@@ -672,10 +706,19 @@ with st.sidebar:
         min_value=0.0,
         step=0.005,
         format="%.4f",
-        help="Higher = missile slows down faster. Drag is automatically affected by speed and altitude."
+        help="Higher = missile slows down faster. Drag is affected by speed and altitude."
     )
 
-    st.caption("Drag automatically increases at higher Mach and decreases at higher altitude.")
+    turn_drag_strength = st.number_input(
+        "Turn drag strength",
+        value=0.004,
+        min_value=0.0,
+        step=0.001,
+        format="%.4f",
+        help="Extra speed loss while the missile turns. 0 disables turn drag."
+    )
+
+    st.caption("Aero drag uses Mach + altitude. Turn drag adds extra loss during hard turns.")
 
     start_horizontal_range = st.number_input("Starting horizontal distance from target km", value=40.0, step=1.0)
     activation_range = st.number_input("Seeker activation range km", value=12.0, step=0.5)
@@ -796,6 +839,8 @@ def run_simulation():
     final_target_phase = []
     final_air_density = []
     final_mach_drag_factor = []
+    final_aero_drag = []
+    final_turn_drag = []
     final_actual_drag = []
     final_turn_rate = []
     final_thrust = []
@@ -882,6 +927,8 @@ def run_simulation():
         target_phase_list = []
         air_density_list = []
         mach_drag_factor_list = []
+        aero_drag_list = []
+        turn_drag_list = []
         actual_drag_list = []
         turn_rate_list = []
         thrust_list = []
@@ -1099,14 +1146,14 @@ def run_simulation():
                     max(horizontal_distance, 1)
                 ))
 
-                phase = f"Auto loft aim {current_loft_angle:.1f}"
+                phase = f"Loft {current_loft_angle:.1f}°"
                 commanded_missile_vel = vec_mul(desired_dir, missile_speed)
 
                 target_accel_perp = [0, 0, 0]
                 target_accel_perp_mag = 0.0
 
             else:
-                phase = "Doc-style APN"
+                phase = "APN"
 
                 omega = vec_mul(
                     vec_cross(rel_pos, rel_vel),
@@ -1214,6 +1261,12 @@ def run_simulation():
             if USE_GRAVITY:
                 missile_vel[2] -= GRAVITY * DT
 
+            old_dir_for_turn = vec_norm(prev_missile_vel)
+            new_dir_for_turn = vec_norm(missile_vel)
+            turn_dot = max(-1, min(1, vec_dot(old_dir_for_turn, new_dir_for_turn)))
+            turn_angle = math.degrees(math.acos(turn_dot))
+            actual_turn_rate = turn_angle / DT if DT > 0 else 0
+
             missile_speed = vec_mag(missile_vel)
             missile_mach = missile_speed / sound_speed
 
@@ -1221,23 +1274,26 @@ def run_simulation():
             current_air_density = air_density_factor(missile_alt_km)
             current_mach_drag_factor = mach_drag_factor(missile_mach)
 
-            actual_drag = missile_drag_per_second(
+            aero_drag = missile_drag_per_second(
                 missile_drag_strength,
                 missile_alt_km,
                 missile_mach
             )
+
+            turn_drag = turn_drag_per_second(
+                turn_drag_strength,
+                actual_turn_rate,
+                missile_alt_km,
+                missile_mach
+            )
+
+            actual_drag = aero_drag + turn_drag
 
             missile_mach = max(0, missile_mach - actual_drag * DT)
             missile_speed = missile_mach * sound_speed
 
             missile_vel = vec_mul(vec_norm(missile_vel), missile_speed)
             missile_pos = vec_add(missile_pos, vec_mul(missile_vel, DT))
-
-            old_dir_for_turn = vec_norm(prev_missile_vel)
-            new_dir_for_turn = vec_norm(missile_vel)
-            turn_dot = max(-1, min(1, vec_dot(old_dir_for_turn, new_dir_for_turn)))
-            turn_angle = math.degrees(math.acos(turn_dot))
-            actual_turn_rate = turn_angle / DT if DT > 0 else 0
 
             rel_pos = vec_sub(target_pos, missile_pos)
             distance = vec_mag(rel_pos)
@@ -1275,16 +1331,18 @@ def run_simulation():
                 if notch_started:
                     notch_elapsed = time - notch_start_time
                     if notch_elapsed < NOTCH_BREAK_TIME:
-                        target_phase_list.append("Notching, break turn")
+                        target_phase_list.append("Notch break")
                     elif notch_mode == 2 and has_lpi and rwr_ping_visible_timer <= 0:
-                        target_phase_list.append("Notching, holding last correction")
+                        target_phase_list.append("Notch hold")
                     else:
-                        target_phase_list.append("Notching, hold/update")
+                        target_phase_list.append("Notch update")
                 else:
                     target_phase_list.append("Normal")
 
                 air_density_list.append(current_air_density)
                 mach_drag_factor_list.append(current_mach_drag_factor)
+                aero_drag_list.append(aero_drag)
+                turn_drag_list.append(turn_drag)
                 actual_drag_list.append(actual_drag)
                 turn_rate_list.append(actual_turn_rate)
                 thrust_list.append(current_thrust_n)
@@ -1346,16 +1404,18 @@ def run_simulation():
             if notch_started:
                 notch_elapsed = time - notch_start_time
                 if notch_elapsed < NOTCH_BREAK_TIME:
-                    target_phase_list.append("Notching, break turn")
+                    target_phase_list.append("Notch break")
                 elif notch_mode == 2 and has_lpi and rwr_ping_visible_timer <= 0:
-                    target_phase_list.append("Notching, holding last correction")
+                    target_phase_list.append("Notch hold")
                 else:
-                    target_phase_list.append("Notching, hold/update")
+                    target_phase_list.append("Notch update")
             else:
                 target_phase_list.append("Normal")
 
             air_density_list.append(current_air_density)
             mach_drag_factor_list.append(current_mach_drag_factor)
+            aero_drag_list.append(aero_drag)
+            turn_drag_list.append(turn_drag)
             actual_drag_list.append(actual_drag)
             turn_rate_list.append(actual_turn_rate)
             thrust_list.append(current_thrust_n)
@@ -1386,6 +1446,8 @@ def run_simulation():
             final_target_phase = target_phase_list
             final_air_density = air_density_list
             final_mach_drag_factor = mach_drag_factor_list
+            final_aero_drag = aero_drag_list
+            final_turn_drag = turn_drag_list
             final_actual_drag = actual_drag_list
             final_turn_rate = turn_rate_list
             final_thrust = thrust_list
@@ -1452,6 +1514,8 @@ def run_simulation():
         "final_target_phase": final_target_phase,
         "final_air_density": final_air_density,
         "final_mach_drag_factor": final_mach_drag_factor,
+        "final_aero_drag": final_aero_drag,
+        "final_turn_drag": final_turn_drag,
         "final_actual_drag": final_actual_drag,
         "final_turn_rate": final_turn_rate,
         "final_thrust": final_thrust,
@@ -1504,10 +1568,10 @@ if run_button:
         st.write(f"Missile reached seeker activation range: **{sum(result['all_activation_distances']) / len(result['all_activation_distances']):.2f} km**")
         st.write(f"Time when it reached seeker activation range: **{sum(result['all_activation_times']) / len(result['all_activation_times']):.2f} sec**")
 
-    st.write(f"Fuel mass mode: **{fuel_mass_mode}**")
-    st.write(f"Used total fuel mass: **{result['total_fuel_kg']:.2f} kg**")
+    st.write(f"Fuel mass: **{result['total_fuel_kg']:.2f} kg**")
     st.write(f"Dry mass: **{result['dry_mass_kg']:.2f} kg**")
-    st.write(f"Drag strength: **{missile_drag_strength:.4f}**")
+    st.write(f"Aero drag strength: **{missile_drag_strength:.4f}**")
+    st.write(f"Turn drag strength: **{turn_drag_strength:.4f}**")
 
     if notch_mode != 0:
         if result["all_notch_times"]:
@@ -1544,40 +1608,25 @@ if run_button:
         missile_hover = []
 
         for i in range(len(final_mx)):
-            manual_launch_text = "No"
-            if use_manual_launch:
-                manual_launch_text = (
-                    f"Yes<br>"
-                    f"Launch horizontal offset: {launch_horizontal_offset_deg:.1f}°<br>"
-                    f"Launch vertical angle: {launch_vertical_angle_deg:.1f}°"
-                )
-
             missile_hover.append(
                 f"Missile<br>"
-                f"Time: {result['final_time'][i]:.2f}s<br>"
+                f"t: {result['final_time'][i]:.2f}s<br>"
                 f"Phase: {result['final_phase'][i]}<br>"
-                f"Speed: Mach {result['final_missile_mach'][i]:.2f}<br>"
-                f"Speed: {result['final_missile_ms'][i]:.0f} m/s<br>"
-                f"Current mass: {result['final_current_mass'][i]:.1f} kg<br>"
-                f"Remaining fuel: {result['final_remaining_fuel'][i]:.1f} kg<br>"
-                f"Fuel mass mode: {fuel_mass_mode}<br>"
-                f"Manual launch: {manual_launch_text}<br>"
-                f"Launch platform Mach: {launch_platform_mach:.2f}<br>"
-                f"Motor thrust: {result['final_thrust'][i]:.0f} N<br>"
-                f"Motor accel: {result['final_motor_accel'][i]:.1f} m/s²<br>"
-                f"Target accel used by APN: {result['final_target_accel'][i]:.1f} m/s²<br>"
-                f"Target accel perpendicular to LOS: {result['final_target_accel_perp'][i]:.1f} m/s²<br>"
-                f"Max G: {missile_max_g:.1f}G<br>"
-                f"Turn rate: {result['final_turn_rate'][i]:.1f}°/s<br>"
-                f"Gravity: {'ON' if USE_GRAVITY else 'OFF'}<br>"
-                f"Drag strength: {missile_drag_strength:.4f}<br>"
-                f"Air density factor: {result['final_air_density'][i]:.3f}<br>"
-                f"Mach drag factor: {result['final_mach_drag_factor'][i]:.3f}<br>"
-                f"Actual drag: {result['final_actual_drag'][i]:.4f} Mach/sec<br>"
-                f"True 3D distance to target: {result['final_distance'][i]:.2f} km<br>"
-                f"X: {final_mx[i]:.2f} km<br>"
-                f"Y: {final_my[i]:.2f} km<br>"
-                f"Alt: {final_mz[i]:.2f} km"
+                f"M: {result['final_missile_mach'][i]:.2f}<br>"
+                f"m/s: {result['final_missile_ms'][i]:.0f}<br>"
+                f"Mass: {result['final_current_mass'][i]:.1f} kg<br>"
+                f"Fuel: {result['final_remaining_fuel'][i]:.1f} kg<br>"
+                f"Thrust: {result['final_thrust'][i]:.0f} N<br>"
+                f"Accel: {result['final_motor_accel'][i]:.1f} m/s²<br>"
+                f"G limit: {missile_max_g:.1f}<br>"
+                f"Turn: {result['final_turn_rate'][i]:.1f}°/s<br>"
+                f"Aero drag: {result['final_aero_drag'][i]:.4f} M/s<br>"
+                f"Turn drag: {result['final_turn_drag'][i]:.4f} M/s<br>"
+                f"Total drag: {result['final_actual_drag'][i]:.4f} M/s<br>"
+                f"Air: {result['final_air_density'][i]:.3f}<br>"
+                f"Mach drag: {result['final_mach_drag_factor'][i]:.3f}<br>"
+                f"Dist: {result['final_distance'][i]:.2f} km<br>"
+                f"X/Y/Z: {final_mx[i]:.2f}, {final_my[i]:.2f}, {final_mz[i]:.2f} km"
             )
 
         target_hover = []
@@ -1585,23 +1634,21 @@ if run_button:
         for i in range(len(final_tx)):
             target_hover.append(
                 f"Target<br>"
-                f"Time: {result['final_time'][i]:.2f}s<br>"
+                f"t: {result['final_time'][i]:.2f}s<br>"
                 f"Phase: {result['final_target_phase'][i]}<br>"
-                f"Speed: Mach {result['final_target_mach'][i]:.2f}<br>"
-                f"Speed: {result['final_target_ms'][i]:.0f} m/s<br>"
-                f"Target heading input: {target_heading:.1f}° relative<br>"
-                f"Target accel: {result['final_target_accel'][i]:.1f} m/s²<br>"
-                f"Target accel perpendicular to LOS: {result['final_target_accel_perp'][i]:.1f} m/s²<br>"
-                f"Max speed: Mach {target_max_mach:.2f}<br>"
-                f"Turn rate setting: {target_turn_rate_deg:.1f}°/s<br>"
-                f"True 3D distance to missile: {result['final_distance'][i]:.2f} km<br>"
-                f"X: {final_tx[i]:.2f} km<br>"
-                f"Y: {final_ty[i]:.2f} km<br>"
-                f"Alt: {final_tz[i]:.2f} km"
+                f"M: {result['final_target_mach'][i]:.2f}<br>"
+                f"m/s: {result['final_target_ms'][i]:.0f}<br>"
+                f"Heading: {target_heading:.1f}°<br>"
+                f"Accel: {result['final_target_accel'][i]:.1f} m/s²<br>"
+                f"APN accel: {result['final_target_accel_perp'][i]:.1f} m/s²<br>"
+                f"Max M: {target_max_mach:.2f}<br>"
+                f"Turn set: {target_turn_rate_deg:.1f}°/s<br>"
+                f"Dist: {result['final_distance'][i]:.2f} km<br>"
+                f"X/Y/Z: {final_tx[i]:.2f}, {final_ty[i]:.2f}, {final_tz[i]:.2f} km"
             )
 
-        terminal_name = f"Document-style APN, N={nav_constant}"
-        guidance_name = f"Auto loft aim {loft_angle}° + {terminal_name}" if use_loft else terminal_name
+        terminal_name = f"APN, N={nav_constant}"
+        guidance_name = f"Loft {loft_angle}° + {terminal_name}" if use_loft else terminal_name
 
         fig.add_trace(go.Scatter3d(
             x=final_mx,
@@ -1627,30 +1674,29 @@ if run_button:
 
         launch_hover = [
             f"Missile launch<br>"
-            f"Launch platform Mach: {launch_platform_mach:.2f}<br>"
-            f"Starting horizontal range: {start_horizontal_range:.2f} km<br>"
+            f"Platform M: {launch_platform_mach:.2f}<br>"
+            f"Range: {start_horizontal_range:.2f} km<br>"
             f"Alt: {missile_altitude:.2f} km<br>"
-            f"Fuel mass mode: {fuel_mass_mode}<br>"
-            f"Start mass: {missile_mass_kg:.1f} kg<br>"
-            f"Dry mass: {result['dry_mass_kg']:.1f} kg<br>"
-            f"Fuel mass: {result['total_fuel_kg']:.1f} kg<br>"
-            f"Drag strength: {missile_drag_strength:.4f}"
+            f"Mass: {missile_mass_kg:.1f} kg<br>"
+            f"Dry: {result['dry_mass_kg']:.1f} kg<br>"
+            f"Fuel: {result['total_fuel_kg']:.1f} kg<br>"
+            f"Aero drag: {missile_drag_strength:.4f}<br>"
+            f"Turn drag: {turn_drag_strength:.4f}"
         ]
 
         if use_manual_launch:
             launch_hover = [
                 f"Missile launch<br>"
-                f"Manual launch direction: Yes<br>"
-                f"Horizontal offset: {launch_horizontal_offset_deg:.1f}°<br>"
-                f"Vertical angle: {launch_vertical_angle_deg:.1f}°<br>"
-                f"Launch platform Mach: {launch_platform_mach:.2f}<br>"
-                f"Starting horizontal range: {start_horizontal_range:.2f} km<br>"
+                f"H offset: {launch_horizontal_offset_deg:.1f}°<br>"
+                f"V angle: {launch_vertical_angle_deg:.1f}°<br>"
+                f"Platform M: {launch_platform_mach:.2f}<br>"
+                f"Range: {start_horizontal_range:.2f} km<br>"
                 f"Alt: {missile_altitude:.2f} km<br>"
-                f"Fuel mass mode: {fuel_mass_mode}<br>"
-                f"Start mass: {missile_mass_kg:.1f} kg<br>"
-                f"Dry mass: {result['dry_mass_kg']:.1f} kg<br>"
-                f"Fuel mass: {result['total_fuel_kg']:.1f} kg<br>"
-                f"Drag strength: {missile_drag_strength:.4f}"
+                f"Mass: {missile_mass_kg:.1f} kg<br>"
+                f"Dry: {result['dry_mass_kg']:.1f} kg<br>"
+                f"Fuel: {result['total_fuel_kg']:.1f} kg<br>"
+                f"Aero drag: {missile_drag_strength:.4f}<br>"
+                f"Turn drag: {turn_drag_strength:.4f}"
             ]
 
         fig.add_trace(go.Scatter3d(
@@ -1659,7 +1705,7 @@ if run_button:
             z=[final_mz[0]],
             mode="markers+text",
             name="Missile launch",
-            text=["Missile launch"],
+            text=["Launch"],
             marker=dict(size=6),
             hovertext=launch_hover,
             hoverinfo="text"
@@ -1675,12 +1721,11 @@ if run_button:
             marker=dict(size=6),
             hovertext=[
                 f"Target start<br>"
-                f"Target heading: {target_heading:.1f}° relative<br>"
-                f"0° = away, 180° = toward, 90° = right, -90° = left<br>"
-                f"Mach {target_mach_start:.2f}<br>"
-                f"Max Mach {target_max_mach:.2f}<br>"
-                f"Turn rate: {target_turn_rate_deg:.1f}°/s<br>"
-                f"Alt {target_altitude:.2f} km"
+                f"Heading: {target_heading:.1f}°<br>"
+                f"M: {target_mach_start:.2f}<br>"
+                f"Max M: {target_max_mach:.2f}<br>"
+                f"Turn: {target_turn_rate_deg:.1f}°/s<br>"
+                f"Alt: {target_altitude:.2f} km"
             ],
             hoverinfo="text"
         ))
@@ -1693,12 +1738,12 @@ if run_button:
                 z=[p[2]],
                 mode="markers+text",
                 name="Seeker activation range marker",
-                text=["Seeker range"],
+                text=["Seeker"],
                 marker=dict(size=9),
                 hovertext=[
-                    f"Seeker activation range marker<br>"
-                    f"Activation range: {activation_range:.2f} km<br>"
-                    f"Time: {result['final_activation_time']:.2f}s"
+                    f"Seeker activation<br>"
+                    f"Range: {activation_range:.2f} km<br>"
+                    f"t: {result['final_activation_time']:.2f}s"
                 ],
                 hoverinfo="text"
             ))
@@ -1714,11 +1759,11 @@ if run_button:
                 text=["Notch"],
                 marker=dict(size=9),
                 hovertext=[
-                    f"Target started notching<br>"
-                    f"Notch mode: {notch_mode}<br>"
-                    f"Side: fixed {result['final_notch_side']}<br>"
-                    f"Vertical angle: {notch_vertical_angle:.2f}°<br>"
-                    f"Target turn rate: {target_turn_rate_deg:.1f}°/s"
+                    f"Target notch<br>"
+                    f"Mode: {notch_mode}<br>"
+                    f"Side: {result['final_notch_side']}<br>"
+                    f"V angle: {notch_vertical_angle:.1f}°<br>"
+                    f"Turn: {target_turn_rate_deg:.1f}°/s"
                 ],
                 hoverinfo="text"
             ))
@@ -1734,11 +1779,11 @@ if run_button:
                 text=["Target turn"],
                 marker=dict(size=9),
                 hovertext=[
-                    f"Target direction change<br>"
-                    f"Changed at altitude: {change_altitude:.2f} km<br>"
-                    f"New heading relative: {new_target_heading:.2f}°<br>"
-                    f"New vertical angle: {new_target_climb:.2f}°<br>"
-                    f"Turn rate: {target_turn_rate_deg:.1f}°/s"
+                    f"Target turn<br>"
+                    f"Alt trigger: {change_altitude:.2f} km<br>"
+                    f"New heading: {new_target_heading:.1f}°<br>"
+                    f"New V: {new_target_climb:.1f}°<br>"
+                    f"Turn: {target_turn_rate_deg:.1f}°/s"
                 ],
                 hoverinfo="text"
             ))
@@ -1753,11 +1798,11 @@ if run_button:
 
             end_hover = [
                 f"Intercept<br>"
-                f"Time: {result['final_end_time']:.2f}s<br>"
-                f"Miss distance: {result['final_end_distance'] * 1000:.2f} m<br>"
-                f"Seeker activation to intercept: {activation_to_intercept_text}<br>"
-                f"Final mass: {result['final_current_mass'][-1]:.1f} kg<br>"
-                f"Remaining fuel: {result['final_remaining_fuel'][-1]:.1f} kg"
+                f"t: {result['final_end_time']:.2f}s<br>"
+                f"Miss: {result['final_end_distance'] * 1000:.2f} m<br>"
+                f"Seeker→hit: {activation_to_intercept_text}<br>"
+                f"Mass: {result['final_current_mass'][-1]:.1f} kg<br>"
+                f"Fuel: {result['final_remaining_fuel'][-1]:.1f} kg"
             ]
         else:
             end_name = "Simulation end"
@@ -1766,17 +1811,13 @@ if run_button:
             final_dist_text = f"{result['final_end_distance']:.2f} km" if result["final_end_distance"] is not None else "unknown"
 
             end_hover = [
-                f"Simulation ended without intercept<br>"
-                f"Final distance: {final_dist_text}<br>"
-                f"Time: {result['final_end_time']:.2f}s<br>"
-                f"Final mass: {result['final_current_mass'][-1]:.1f} kg<br>"
-                f"Remaining fuel: {result['final_remaining_fuel'][-1]:.1f} kg<br>"
-                f"Target X: {final_tx[-1]:.2f} km<br>"
-                f"Target Y: {final_ty[-1]:.2f} km<br>"
-                f"Target Alt: {final_tz[-1]:.2f} km<br>"
-                f"Missile X: {final_mx[-1]:.2f} km<br>"
-                f"Missile Y: {final_my[-1]:.2f} km<br>"
-                f"Missile Alt: {final_mz[-1]:.2f} km"
+                f"No intercept<br>"
+                f"t: {result['final_end_time']:.2f}s<br>"
+                f"Final dist: {final_dist_text}<br>"
+                f"Mass: {result['final_current_mass'][-1]:.1f} kg<br>"
+                f"Fuel: {result['final_remaining_fuel'][-1]:.1f} kg<br>"
+                f"Target XYZ: {final_tx[-1]:.2f}, {final_ty[-1]:.2f}, {final_tz[-1]:.2f} km<br>"
+                f"Missile XYZ: {final_mx[-1]:.2f}, {final_my[-1]:.2f}, {final_mz[-1]:.2f} km"
             ]
 
         fig.add_trace(go.Scatter3d(
@@ -1804,7 +1845,7 @@ if run_button:
                 hovertext=[
                     f"First ping<br>"
                     f"Distance: {result['final_ping_distance']:.2f} km<br>"
-                    f"Time: {result['final_ping_time']:.2f}s"
+                    f"t: {result['final_ping_time']:.2f}s"
                 ],
                 hoverinfo="text"
             ))
@@ -1822,7 +1863,7 @@ if run_button:
                 hovertext=[
                     f"Average first ping<br>"
                     f"Distance: {result['avg_ping_distance']:.2f} km<br>"
-                    f"Time: {result['avg_ping_time']:.2f}s"
+                    f"t: {result['avg_ping_time']:.2f}s"
                 ],
                 hoverinfo="text"
             ))
