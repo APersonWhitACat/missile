@@ -181,14 +181,49 @@ def limit_missile_g(old_vel, commanded_vel, max_g, dt):
     return vec_mul(limited_dir, commanded_speed)
 
 
-def motor_thrust_at_time(time_s, booster_thrust, booster_time, sustainer_thrust, sustainer_time):
+def motor_stage_at_time(time_s, booster_time, sustainer_time):
     if time_s < booster_time:
-        return booster_thrust
+        return "booster"
 
     if time_s < booster_time + sustainer_time:
+        return "sustainer"
+
+    return "off"
+
+
+def motor_thrust_at_time(time_s, booster_thrust, booster_time, sustainer_thrust, sustainer_time):
+    stage = motor_stage_at_time(time_s, booster_time, sustainer_time)
+
+    if stage == "booster":
+        return booster_thrust
+
+    if stage == "sustainer":
         return sustainer_thrust
 
     return 0.0
+
+
+def estimate_total_fuel_from_isp(booster_thrust, booster_time, sustainer_thrust, sustainer_time, isp_seconds):
+    total_impulse = booster_thrust * booster_time + sustainer_thrust * sustainer_time
+
+    if total_impulse <= 0 or isp_seconds <= 0:
+        return 0.0
+
+    return total_impulse / (isp_seconds * GRAVITY)
+
+
+def split_fuel_by_impulse(total_fuel, booster_thrust, booster_time, sustainer_thrust, sustainer_time):
+    booster_impulse = booster_thrust * booster_time
+    sustainer_impulse = sustainer_thrust * sustainer_time
+    total_impulse = booster_impulse + sustainer_impulse
+
+    if total_impulse <= 0 or total_fuel <= 0:
+        return 0.0, 0.0
+
+    booster_fuel = total_fuel * booster_impulse / total_impulse
+    sustainer_fuel = total_fuel * sustainer_impulse / total_impulse
+
+    return booster_fuel, sustainer_fuel
 
 
 def choose_notch_side(target_pos, missile_pos, current_target_dir):
@@ -548,13 +583,68 @@ with st.sidebar:
             step=5.0
         )
 
-    missile_mass_kg = st.number_input("Missile mass kg", value=168.0, min_value=1.0, step=1.0)
+    missile_mass_kg = st.number_input("Missile total mass kg", value=168.0, min_value=1.0, step=1.0)
 
     booster_thrust_n = st.number_input("Booster thrust N", value=19500.0, min_value=0.0, step=500.0)
     booster_burn_time = st.number_input("Booster burn time s", value=8.0, min_value=0.0, step=0.5)
 
     sustainer_thrust_n = st.number_input("Sustainer thrust N", value=0.0, min_value=0.0, step=500.0)
     sustainer_burn_time = st.number_input("Sustainer burn time s", value=0.0, min_value=0.0, step=0.5)
+
+    st.header("Fuel / Mass Loss")
+
+    fuel_mass_mode = st.selectbox(
+        "Fuel mass mode",
+        options=["No mass loss", "Known fuel mass", "Estimate from Isp"]
+    )
+
+    known_fuel_mass_kg = 0.0
+    isp_seconds = 240.0
+
+    if fuel_mass_mode == "Known fuel mass":
+        known_fuel_mass_kg = st.number_input(
+            "Known total fuel mass kg",
+            value=0.0,
+            min_value=0.0,
+            max_value=float(missile_mass_kg * 0.95),
+            step=1.0
+        )
+
+    if fuel_mass_mode == "Estimate from Isp":
+        isp_seconds = st.number_input(
+            "Specific impulse Isp seconds",
+            value=240.0,
+            min_value=1.0,
+            step=5.0
+        )
+
+    if fuel_mass_mode == "No mass loss":
+        displayed_total_fuel = 0.0
+    elif fuel_mass_mode == "Known fuel mass":
+        displayed_total_fuel = min(known_fuel_mass_kg, missile_mass_kg * 0.95)
+    else:
+        displayed_total_fuel = estimate_total_fuel_from_isp(
+            booster_thrust_n,
+            booster_burn_time,
+            sustainer_thrust_n,
+            sustainer_burn_time,
+            isp_seconds
+        )
+        displayed_total_fuel = min(displayed_total_fuel, missile_mass_kg * 0.80)
+
+    displayed_dry_mass = missile_mass_kg - displayed_total_fuel
+    displayed_booster_fuel, displayed_sustainer_fuel = split_fuel_by_impulse(
+        displayed_total_fuel,
+        booster_thrust_n,
+        booster_burn_time,
+        sustainer_thrust_n,
+        sustainer_burn_time
+    )
+
+    st.caption(f"Estimated/used fuel mass: {displayed_total_fuel:.1f} kg")
+    st.caption(f"Dry mass after fuel is gone: {displayed_dry_mass:.1f} kg")
+    st.caption(f"Booster fuel share: {displayed_booster_fuel:.1f} kg")
+    st.caption(f"Sustainer fuel share: {displayed_sustainer_fuel:.1f} kg")
 
     missile_max_g = st.number_input("Missile max G", value=40.0, min_value=1.0, step=1.0)
 
@@ -634,6 +724,30 @@ def run_simulation():
 
     target_max_speed = target_max_mach * sound_speed
 
+    if fuel_mass_mode == "No mass loss":
+        total_fuel_kg = 0.0
+    elif fuel_mass_mode == "Known fuel mass":
+        total_fuel_kg = min(known_fuel_mass_kg, missile_mass_kg * 0.95)
+    else:
+        total_fuel_kg = estimate_total_fuel_from_isp(
+            booster_thrust_n,
+            booster_burn_time,
+            sustainer_thrust_n,
+            sustainer_burn_time,
+            isp_seconds
+        )
+        total_fuel_kg = min(total_fuel_kg, missile_mass_kg * 0.80)
+
+    dry_mass_kg = missile_mass_kg - total_fuel_kg
+
+    initial_booster_fuel_kg, initial_sustainer_fuel_kg = split_fuel_by_impulse(
+        total_fuel_kg,
+        booster_thrust_n,
+        booster_burn_time,
+        sustainer_thrust_n,
+        sustainer_burn_time
+    )
+
     all_hit_times = []
     all_activation_to_hit_times = []
 
@@ -665,6 +779,8 @@ def run_simulation():
     final_motor_accel = []
     final_target_accel = []
     final_target_accel_perp = []
+    final_current_mass = []
+    final_remaining_fuel = []
 
     final_ping_point = None
     final_ping_distance = None
@@ -681,6 +797,9 @@ def run_simulation():
     final_activation_to_intercept_time = None
 
     for run in range(int(runs)):
+        remaining_booster_fuel = initial_booster_fuel_kg
+        remaining_sustainer_fuel = initial_sustainer_fuel_kg
+
         missile_mach = launch_platform_mach
         target_mach = target_mach_start
 
@@ -745,6 +864,8 @@ def run_simulation():
         motor_accel_list = []
         target_accel_list = []
         target_accel_perp_list = []
+        current_mass_list = []
+        remaining_fuel_list = []
 
         while time <= MAX_TIME:
             prev_target_pos = target_pos[:]
@@ -1009,6 +1130,12 @@ def run_simulation():
                 DT
             )
 
+            current_stage = motor_stage_at_time(
+                time,
+                booster_burn_time,
+                sustainer_burn_time
+            )
+
             current_thrust_n = motor_thrust_at_time(
                 time,
                 booster_thrust_n,
@@ -1017,7 +1144,38 @@ def run_simulation():
                 sustainer_burn_time
             )
 
-            motor_accel_ms2 = current_thrust_n / max(missile_mass_kg, 1.0)
+            if fuel_mass_mode != "No mass loss":
+                if current_stage == "booster":
+                    if booster_burn_time > 0 and initial_booster_fuel_kg > 0 and remaining_booster_fuel > 0:
+                        burn_rate = initial_booster_fuel_kg / booster_burn_time
+                        fuel_to_burn = min(remaining_booster_fuel, burn_rate * DT)
+                        remaining_booster_fuel -= fuel_to_burn
+                    elif initial_booster_fuel_kg <= 0:
+                        current_thrust_n = 0.0
+
+                elif current_stage == "sustainer":
+                    if sustainer_burn_time > 0 and initial_sustainer_fuel_kg > 0 and remaining_sustainer_fuel > 0:
+                        burn_rate = initial_sustainer_fuel_kg / sustainer_burn_time
+                        fuel_to_burn = min(remaining_sustainer_fuel, burn_rate * DT)
+                        remaining_sustainer_fuel -= fuel_to_burn
+                    elif initial_sustainer_fuel_kg <= 0:
+                        current_thrust_n = 0.0
+
+                if current_stage == "booster" and remaining_booster_fuel <= 0:
+                    current_thrust_n = 0.0
+
+                if current_stage == "sustainer" and remaining_sustainer_fuel <= 0:
+                    current_thrust_n = 0.0
+
+                current_mass_kg = dry_mass_kg + remaining_booster_fuel + remaining_sustainer_fuel
+                remaining_total_fuel = remaining_booster_fuel + remaining_sustainer_fuel
+            else:
+                current_mass_kg = missile_mass_kg
+                remaining_total_fuel = 0.0
+
+            current_mass_kg = max(current_mass_kg, 1.0)
+
+            motor_accel_ms2 = current_thrust_n / current_mass_kg
 
             if vec_mag(missile_vel) > 1e-6:
                 thrust_dir = vec_norm(missile_vel)
@@ -1102,6 +1260,8 @@ def run_simulation():
                 motor_accel_list.append(motor_accel_ms2)
                 target_accel_list.append(vec_mag(actual_target_accel_vec))
                 target_accel_perp_list.append(target_accel_perp_mag)
+                current_mass_list.append(current_mass_kg)
+                remaining_fuel_list.append(remaining_total_fuel)
 
                 if run == 0:
                     final_intercepted = True
@@ -1170,6 +1330,8 @@ def run_simulation():
             motor_accel_list.append(motor_accel_ms2)
             target_accel_list.append(vec_mag(actual_target_accel_vec))
             target_accel_perp_list.append(target_accel_perp_mag)
+            current_mass_list.append(current_mass_kg)
+            remaining_fuel_list.append(remaining_total_fuel)
 
             time += DT
 
@@ -1197,6 +1359,8 @@ def run_simulation():
             final_motor_accel = motor_accel_list
             final_target_accel = target_accel_list
             final_target_accel_perp = target_accel_perp_list
+            final_current_mass = current_mass_list
+            final_remaining_fuel = remaining_fuel_list
 
             final_ping_point = first_ping_point
             final_ping_distance = first_ping_distance
@@ -1260,6 +1424,8 @@ def run_simulation():
         "final_motor_accel": final_motor_accel,
         "final_target_accel": final_target_accel,
         "final_target_accel_perp": final_target_accel_perp,
+        "final_current_mass": final_current_mass,
+        "final_remaining_fuel": final_remaining_fuel,
 
         "final_ping_point": final_ping_point,
         "final_ping_distance": final_ping_distance,
@@ -1279,6 +1445,11 @@ def run_simulation():
         "final_intercepted": final_intercepted,
         "final_end_time": final_end_time,
         "final_end_distance": final_end_distance,
+
+        "total_fuel_kg": total_fuel_kg,
+        "dry_mass_kg": dry_mass_kg,
+        "initial_booster_fuel_kg": initial_booster_fuel_kg,
+        "initial_sustainer_fuel_kg": initial_sustainer_fuel_kg,
     }
 
 
@@ -1298,6 +1469,10 @@ if run_button:
     if result["all_activation_times"]:
         st.write(f"Missile reached seeker activation range: **{sum(result['all_activation_distances']) / len(result['all_activation_distances']):.2f} km**")
         st.write(f"Time when it reached seeker activation range: **{sum(result['all_activation_times']) / len(result['all_activation_times']):.2f} sec**")
+
+    st.write(f"Fuel mass mode: **{fuel_mass_mode}**")
+    st.write(f"Used total fuel mass: **{result['total_fuel_kg']:.2f} kg**")
+    st.write(f"Dry mass: **{result['dry_mass_kg']:.2f} kg**")
 
     if notch_mode != 0:
         if result["all_notch_times"]:
@@ -1348,13 +1523,15 @@ if run_button:
                 f"Phase: {result['final_phase'][i]}<br>"
                 f"Speed: Mach {result['final_missile_mach'][i]:.2f}<br>"
                 f"Speed: {result['final_missile_ms'][i]:.0f} m/s<br>"
+                f"Current mass: {result['final_current_mass'][i]:.1f} kg<br>"
+                f"Remaining fuel: {result['final_remaining_fuel'][i]:.1f} kg<br>"
+                f"Fuel mass mode: {fuel_mass_mode}<br>"
                 f"Manual launch: {manual_launch_text}<br>"
                 f"Launch platform Mach: {launch_platform_mach:.2f}<br>"
                 f"Motor thrust: {result['final_thrust'][i]:.0f} N<br>"
                 f"Motor accel: {result['final_motor_accel'][i]:.1f} m/s²<br>"
                 f"Target accel used by APN: {result['final_target_accel'][i]:.1f} m/s²<br>"
                 f"Target accel perpendicular to LOS: {result['final_target_accel_perp'][i]:.1f} m/s²<br>"
-                f"Missile mass: {missile_mass_kg:.1f} kg<br>"
                 f"Max G: {missile_max_g:.1f}G<br>"
                 f"Turn rate: {result['final_turn_rate'][i]:.1f}°/s<br>"
                 f"Gravity: {'ON' if USE_GRAVITY else 'OFF'}<br>"
@@ -1416,7 +1593,11 @@ if run_button:
             f"Missile launch<br>"
             f"Launch platform Mach: {launch_platform_mach:.2f}<br>"
             f"Starting horizontal range: {start_horizontal_range:.2f} km<br>"
-            f"Alt: {missile_altitude:.2f} km"
+            f"Alt: {missile_altitude:.2f} km<br>"
+            f"Fuel mass mode: {fuel_mass_mode}<br>"
+            f"Start mass: {missile_mass_kg:.1f} kg<br>"
+            f"Dry mass: {result['dry_mass_kg']:.1f} kg<br>"
+            f"Fuel mass: {result['total_fuel_kg']:.1f} kg"
         ]
 
         if use_manual_launch:
@@ -1427,7 +1608,11 @@ if run_button:
                 f"Vertical angle: {launch_vertical_angle_deg:.1f}°<br>"
                 f"Launch platform Mach: {launch_platform_mach:.2f}<br>"
                 f"Starting horizontal range: {start_horizontal_range:.2f} km<br>"
-                f"Alt: {missile_altitude:.2f} km"
+                f"Alt: {missile_altitude:.2f} km<br>"
+                f"Fuel mass mode: {fuel_mass_mode}<br>"
+                f"Start mass: {missile_mass_kg:.1f} kg<br>"
+                f"Dry mass: {result['dry_mass_kg']:.1f} kg<br>"
+                f"Fuel mass: {result['total_fuel_kg']:.1f} kg"
             ]
 
         fig.add_trace(go.Scatter3d(
@@ -1532,7 +1717,9 @@ if run_button:
                 f"Intercept<br>"
                 f"Time: {result['final_end_time']:.2f}s<br>"
                 f"Miss distance: {result['final_end_distance'] * 1000:.2f} m<br>"
-                f"Seeker activation to intercept: {activation_to_intercept_text}"
+                f"Seeker activation to intercept: {activation_to_intercept_text}<br>"
+                f"Final mass: {result['final_current_mass'][-1]:.1f} kg<br>"
+                f"Remaining fuel: {result['final_remaining_fuel'][-1]:.1f} kg"
             ]
         else:
             end_name = "Simulation end"
@@ -1544,6 +1731,8 @@ if run_button:
                 f"Simulation ended without intercept<br>"
                 f"Final distance: {final_dist_text}<br>"
                 f"Time: {result['final_end_time']:.2f}s<br>"
+                f"Final mass: {result['final_current_mass'][-1]:.1f} kg<br>"
+                f"Remaining fuel: {result['final_remaining_fuel'][-1]:.1f} kg<br>"
                 f"Target X: {final_tx[-1]:.2f} km<br>"
                 f"Target Y: {final_ty[-1]:.2f} km<br>"
                 f"Target Alt: {final_tz[-1]:.2f} km<br>"
