@@ -934,48 +934,74 @@ def run_simulation():
 
             current_tti = estimate_tti_seconds(target_pos, missile_pos, target_vel, missile_vel)
 
+            # Game-like guidance model:
+            # APN is calculated for the whole flight.
+            # Before seeker activation, loft adds an upward bias to APN.
+            # After seeker activation, loft is removed and the missile uses pure APN.
+            omega = vec_mul(vec_cross(rel_pos, rel_vel), 1.0 / max(distance * distance, 1e-9))
+            closing_speed = -vec_dot(rel_pos, rel_vel) / max(distance, 1e-9)
+            closing_speed = max(closing_speed, 0.0)
+            los_unit = vec_norm(rel_pos)
+
+            pn_scale = game_pn_n_scale(distance)
+            arm_scale = game_arm_scale(distance)
+            effective_nav_constant = nav_constant * pn_scale
+            effective_apn_gain = apn_gain * arm_scale
+
+            pn_accel = vec_mul(vec_cross(los_unit, omega), -effective_nav_constant * closing_speed)
+            target_accel_parallel = vec_mul(los_unit, vec_dot(actual_target_accel_vec, los_unit))
+            target_accel_perp = vec_sub(actual_target_accel_vec, target_accel_parallel)
+            target_accel_perp_mag = vec_mag(target_accel_perp)
+            apn_accel = vec_mul(target_accel_perp, effective_apn_gain * effective_nav_constant / 2.0)
+            commanded_accel = vec_add(pn_accel, apn_accel)
+            apn_commanded_vel = vec_add(missile_vel, vec_mul(commanded_accel, DT))
+
+            commanded_missile_vel = apn_commanded_vel
+            phase = "APN"
+
             if use_loft and not reached_activation_range:
                 current_range_km = distance / 1000.0
+
                 if start_horizontal_range > activation_range:
                     loft_fraction = (current_range_km - activation_range) / (start_horizontal_range - activation_range)
                 else:
                     loft_fraction = 0.0
+
                 loft_fraction = max(0.0, min(1.0, loft_fraction))
 
                 effective_loft_decay = loft_decay if loft_decay > 0.0 else 1.0
                 loft_curve = loft_fraction ** effective_loft_decay
 
-                horizontal_distance = math.sqrt((target_pos[0] - missile_pos[0]) ** 2 + (target_pos[1] - missile_pos[1]) ** 2)
+                horizontal_distance = math.sqrt(
+                    (target_pos[0] - missile_pos[0]) ** 2
+                    + (target_pos[1] - missile_pos[1]) ** 2
+                )
+
                 max_loft_offset = math.tan(math.radians(loft_angle)) * horizontal_distance
                 max_loft_offset = min(max_loft_offset, 50000.0)
                 current_loft_offset = max_loft_offset * loft_factor * loft_curve
 
                 loft_aim_point = [target_pos[0], target_pos[1], target_pos[2] + current_loft_offset]
-                desired_dir = vec_norm(vec_sub(loft_aim_point, missile_pos))
-                current_loft_angle = math.degrees(math.atan2(loft_aim_point[2] - missile_pos[2], max(horizontal_distance, 1.0)))
+                loft_dir = vec_norm(vec_sub(loft_aim_point, missile_pos))
 
-                phase = f"Loft {current_loft_angle:.1f}°"
-                commanded_missile_vel = vec_mul(desired_dir, missile_speed)
-                target_accel_perp_mag = 0.0
-            else:
-                phase = "APN"
-                omega = vec_mul(vec_cross(rel_pos, rel_vel), 1.0 / max(distance * distance, 1e-9))
-                closing_speed = -vec_dot(rel_pos, rel_vel) / max(distance, 1e-9)
-                closing_speed = max(closing_speed, 0.0)
-                los_unit = vec_norm(rel_pos)
+                apn_dir = vec_norm(apn_commanded_vel)
+                if vec_mag(apn_dir) < 1e-9:
+                    apn_dir = vec_norm(rel_pos)
 
-                pn_scale = game_pn_n_scale(distance)
-                arm_scale = game_arm_scale(distance)
-                effective_nav_constant = nav_constant * pn_scale
-                effective_apn_gain = apn_gain * arm_scale
+                # LoftFactor controls how strongly the loft aim direction biases APN.
+                # Values above 1 are allowed and make the loft much more visible.
+                loft_bias_strength = max(0.0, loft_factor * loft_curve)
+                combined_dir = vec_norm(vec_add(apn_dir, vec_mul(loft_dir, loft_bias_strength)))
 
-                pn_accel = vec_mul(vec_cross(los_unit, omega), -effective_nav_constant * closing_speed)
-                target_accel_parallel = vec_mul(los_unit, vec_dot(actual_target_accel_vec, los_unit))
-                target_accel_perp = vec_sub(actual_target_accel_vec, target_accel_parallel)
-                target_accel_perp_mag = vec_mag(target_accel_perp)
-                apn_accel = vec_mul(target_accel_perp, effective_apn_gain * effective_nav_constant / 2.0)
-                commanded_accel = vec_add(pn_accel, apn_accel)
-                commanded_missile_vel = vec_add(missile_vel, vec_mul(commanded_accel, DT))
+                if vec_mag(combined_dir) > 1e-9:
+                    commanded_missile_vel = vec_mul(combined_dir, max(vec_mag(apn_commanded_vel), missile_speed))
+
+                current_loft_angle = math.degrees(math.atan2(
+                    loft_aim_point[2] - missile_pos[2],
+                    max(horizontal_distance, 1.0)
+                ))
+
+                phase = f"APN + Loft {current_loft_angle:.1f}°"
 
             missile_vel = limit_missile_g(missile_vel, commanded_missile_vel, missile_max_g, DT)
 
