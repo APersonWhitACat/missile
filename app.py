@@ -108,10 +108,6 @@ def manual_launch_direction(missile_pos, target_pos, horizontal_offset_deg, vert
 
 
 def air_density_factor(alt_km):
-    # Simple atmosphere curve:
-    # sea level = 1.0
-    # 10 km ≈ 0.33
-    # 20 km ≈ 0.11
     return max(0.05, math.exp(-max(0.0, alt_km) / 9.0))
 
 
@@ -125,11 +121,11 @@ def mach_drag_factor(mach):
     return max(0.15, (mach / reference_mach) ** MACH_DRAG_EXPONENT)
 
 
-def missile_drag_per_second(drag_strength, drag_multiplier, alt_km, mach):
+def missile_drag_per_second(drag_strength, alt_km, mach):
     density = air_density_factor(alt_km)
     mach_factor = mach_drag_factor(mach)
 
-    return drag_strength * drag_multiplier * density * mach_factor
+    return drag_strength * density * mach_factor
 
 
 def closest_distance_between_steps(prev_target, prev_missile, new_target, new_missile):
@@ -677,14 +673,6 @@ with st.sidebar:
         step=0.005,
         format="%.4f",
         help="Higher = missile slows down faster. Drag is automatically affected by speed and altitude."
-    )
-
-    drag_multiplier = st.number_input(
-        "Drag multiplier",
-        value=1.0,
-        min_value=0.0,
-        step=0.1,
-        help="1.0 = normal. Increase if the missile keeps too much speed, decrease if it slows too much."
     )
 
     st.caption("Drag automatically increases at higher Mach and decreases at higher altitude.")
@@ -1235,7 +1223,6 @@ def run_simulation():
 
             actual_drag = missile_drag_per_second(
                 missile_drag_strength,
-                drag_multiplier,
                 missile_alt_km,
                 missile_mach
             )
@@ -1521,7 +1508,6 @@ if run_button:
     st.write(f"Used total fuel mass: **{result['total_fuel_kg']:.2f} kg**")
     st.write(f"Dry mass: **{result['dry_mass_kg']:.2f} kg**")
     st.write(f"Drag strength: **{missile_drag_strength:.4f}**")
-    st.write(f"Drag multiplier: **{drag_multiplier:.2f}x**")
 
     if notch_mode != 0:
         if result["all_notch_times"]:
@@ -1585,7 +1571,6 @@ if run_button:
                 f"Turn rate: {result['final_turn_rate'][i]:.1f}°/s<br>"
                 f"Gravity: {'ON' if USE_GRAVITY else 'OFF'}<br>"
                 f"Drag strength: {missile_drag_strength:.4f}<br>"
-                f"Drag multiplier: {drag_multiplier:.2f}x<br>"
                 f"Air density factor: {result['final_air_density'][i]:.3f}<br>"
                 f"Mach drag factor: {result['final_mach_drag_factor'][i]:.3f}<br>"
                 f"Actual drag: {result['final_actual_drag'][i]:.4f} Mach/sec<br>"
@@ -1649,8 +1634,7 @@ if run_button:
             f"Start mass: {missile_mass_kg:.1f} kg<br>"
             f"Dry mass: {result['dry_mass_kg']:.1f} kg<br>"
             f"Fuel mass: {result['total_fuel_kg']:.1f} kg<br>"
-            f"Drag strength: {missile_drag_strength:.4f}<br>"
-            f"Drag multiplier: {drag_multiplier:.2f}x"
+            f"Drag strength: {missile_drag_strength:.4f}"
         ]
 
         if use_manual_launch:
@@ -1666,8 +1650,7 @@ if run_button:
                 f"Start mass: {missile_mass_kg:.1f} kg<br>"
                 f"Dry mass: {result['dry_mass_kg']:.1f} kg<br>"
                 f"Fuel mass: {result['total_fuel_kg']:.1f} kg<br>"
-                f"Drag strength: {missile_drag_strength:.4f}<br>"
-                f"Drag multiplier: {drag_multiplier:.2f}x"
+                f"Drag strength: {missile_drag_strength:.4f}"
             ]
 
         fig.add_trace(go.Scatter3d(
