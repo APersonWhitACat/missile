@@ -127,11 +127,11 @@ def drag_force_newtons(speed_ms, alt_km, diameter_m, cd):
     return 0.5 * rho * speed_ms * speed_ms * cd * area
 
 
-def turn_drag_force_newtons(base_drag_force, turn_rate_deg_s, turn_drag_multiplier):
-    if turn_drag_multiplier <= 0.0:
+def turn_drag_force_newtons(base_drag_force, turn_rate_deg_s, turn_bleed_multiplier):
+    if turn_bleed_multiplier <= 0.0:
         return 0.0
     turn_factor = (max(0.0, turn_rate_deg_s) / 100.0) ** 2
-    return base_drag_force * turn_drag_multiplier * turn_factor
+    return base_drag_force * turn_bleed_multiplier * turn_factor
 
 
 # ============================================================
@@ -215,6 +215,16 @@ def estimate_tti_seconds(target_pos, missile_pos, target_vel, missile_vel):
         return None
 
     return distance / closing_speed
+
+
+def game_arm_scale(distance_m):
+    x = max(0.0, distance_m)
+    return 0.97 / (1.0 + (x * 0.005) ** 2) + 0.03
+
+
+def game_pn_n_scale(distance_m):
+    x = max(0.0, distance_m)
+    return 0.6 / (1.0 + (x * 0.002) ** 2) + 0.4
 
 
 def choose_notch_side(target_pos, missile_pos, current_target_dir):
@@ -448,7 +458,7 @@ with st.sidebar:
 
     target_heading = st.number_input("Target heading relative to missile degrees, 0=away, 180=toward, 90=right, -90=left", value=0.0, step=5.0)
     target_climb = st.number_input("Target vertical angle degrees, +up / -down", value=0.0, step=1.0)
-    target_turn_rate_deg = st.number_input("Target turn rate deg/sec", value=45.0, min_value=1.0, step=1.0)
+    target_turn_rate_deg = st.number_input("Target turn rate deg/sec", value=0.0, min_value=0.0, step=1.0)
 
     if target_max_mach < target_mach_start:
         target_max_mach = target_mach_start
@@ -496,15 +506,15 @@ with st.sidebar:
 
     if use_manual_launch:
         launch_horizontal_offset_deg = st.number_input("Launch horizontal offset degrees, 0=toward target, 90=right, -90=left", value=0.0, step=5.0)
-        launch_vertical_angle_deg = st.number_input("Launch vertical angle degrees, +up / -down", value=20.0, step=5.0)
+        launch_vertical_angle_deg = st.number_input("Launch vertical angle degrees, +up / -down", value=0.0, step=5.0)
 
-    missile_mass_kg = st.number_input("Missile total mass kg", value=168.0, min_value=1.0, step=1.0)
+    missile_mass_kg = st.number_input("Missile total mass kg", value=0.0, min_value=0.0, step=1.0)
 
     st.header("Motor")
     motor_type = st.selectbox("Motor type", options=["Normal rocket", "Dual pulse", "Ramjet"])
 
-    booster_thrust_n = st.number_input("Booster / first pulse thrust N", value=19500.0, min_value=0.0, step=500.0)
-    booster_burn_time = st.number_input("Booster / first pulse burn time s", value=8.0, min_value=0.0, step=0.5)
+    booster_thrust_n = st.number_input("Booster / first pulse thrust N", value=0.0, min_value=0.0, step=500.0)
+    booster_burn_time = st.number_input("Booster / first pulse burn time s", value=0.0, min_value=0.0, step=0.5)
 
     use_sustainer = False
     sustainer_thrust_n = 0.0
@@ -513,61 +523,61 @@ with st.sidebar:
     second_pulse_thrust_n = 0.0
     second_pulse_burn_time = 0.0
     second_pulse_trigger_mode = "After flight time"
-    second_pulse_trigger_time = 20.0
-    second_pulse_trigger_distance = 20.0
-    second_pulse_trigger_tti = 40.0
+    second_pulse_trigger_time = 0.0
+    second_pulse_trigger_distance = 0.0
+    second_pulse_trigger_tti = 0.0
 
-    ramjet_min_thrust_n = 3900.0
-    ramjet_max_thrust_n = 16000.0
-    ramjet_max_burn_time = 33.3
-    ramjet_idle_fuel_rate = 0.11
-    ramjet_max_fuel_rate = 1.10
-    ramjet_target_mach = 4.0
-    ramjet_best_mach = 2.3
-    ramjet_mach_curve_width = 1.5
-    ramjet_turn_aoa_loss = 1.0
+    ramjet_min_thrust_n = 0.0
+    ramjet_max_thrust_n = 0.0
+    ramjet_max_burn_time = 0.0
+    ramjet_idle_fuel_rate = 0.0
+    ramjet_max_fuel_rate = 0.0
+    ramjet_target_mach = 0.0
+    ramjet_best_mach = 0.0
+    ramjet_mach_curve_width = 0.0
+    ramjet_turn_aoa_loss = 0.0
 
     if motor_type == "Normal rocket":
         use_sustainer = st.checkbox("Use sustainer", value=False)
         if use_sustainer:
-            sustainer_thrust_n = st.number_input("Sustainer thrust N", value=6000.0, min_value=0.0, step=500.0)
-            sustainer_burn_time = st.number_input("Sustainer burn time s", value=6.0, min_value=0.0, step=0.5)
+            sustainer_thrust_n = st.number_input("Sustainer thrust N", value=0.0, min_value=0.0, step=500.0)
+            sustainer_burn_time = st.number_input("Sustainer burn time s", value=0.0, min_value=0.0, step=0.5)
 
     if motor_type == "Dual pulse":
-        second_pulse_thrust_n = st.number_input("Second pulse thrust N", value=12000.0, min_value=0.0, step=500.0)
-        second_pulse_burn_time = st.number_input("Second pulse burn time s", value=4.0, min_value=0.0, step=0.5)
+        second_pulse_thrust_n = st.number_input("Second pulse thrust N", value=0.0, min_value=0.0, step=500.0)
+        second_pulse_burn_time = st.number_input("Second pulse burn time s", value=0.0, min_value=0.0, step=0.5)
         second_pulse_trigger_mode = st.selectbox("Second pulse trigger mode", options=["After flight time", "At target distance", "Time to target estimate"])
 
         if second_pulse_trigger_mode == "After flight time":
-            second_pulse_trigger_time = st.number_input("Start second pulse after flight time s", value=20.0, min_value=0.0, step=1.0)
+            second_pulse_trigger_time = st.number_input("Start second pulse after flight time s", value=0.0, min_value=0.0, step=1.0)
         elif second_pulse_trigger_mode == "At target distance":
-            second_pulse_trigger_distance = st.number_input("Start second pulse when target distance is km", value=20.0, min_value=0.0, step=1.0)
+            second_pulse_trigger_distance = st.number_input("Start second pulse when target distance is km", value=0.0, min_value=0.0, step=1.0)
         elif second_pulse_trigger_mode == "Time to target estimate":
-            second_pulse_trigger_tti = st.number_input("Start second pulse when estimated time to target is s", value=40.0, min_value=0.0, step=1.0)
+            second_pulse_trigger_tti = st.number_input("Start second pulse when estimated time to target is s", value=0.0, min_value=0.0, step=1.0)
 
     if motor_type == "Ramjet":
-        ramjet_min_thrust_n = st.number_input("Ramjet minimum thrust N", value=3900.0, min_value=0.0, step=100.0)
-        ramjet_max_thrust_n = st.number_input("Ramjet maximum thrust N", value=16000.0, min_value=0.0, step=500.0)
-        ramjet_max_burn_time = st.number_input("Ramjet max burn time s", value=33.3, min_value=0.0, step=0.1)
-        ramjet_idle_fuel_rate = st.number_input("Ramjet idle fuel rate kg/s", value=0.11, min_value=0.0, step=0.01)
-        ramjet_max_fuel_rate = st.number_input("Ramjet max fuel rate kg/s", value=1.10, min_value=0.0, step=0.05)
-        ramjet_target_mach = st.number_input("Ramjet target / fuel-save Mach", value=4.0, min_value=0.1, step=0.1)
-        ramjet_best_mach = st.number_input("Ramjet best efficiency Mach", value=2.3, min_value=0.1, step=0.1)
-        ramjet_mach_curve_width = st.number_input("Ramjet Mach efficiency curve width", value=1.5, min_value=0.1, step=0.1)
-        ramjet_turn_aoa_loss = st.number_input("Ramjet turn / AOA intake loss", value=1.0, min_value=0.0, step=0.1)
+        ramjet_min_thrust_n = st.number_input("Ramjet minimum thrust N", value=0.0, min_value=0.0, step=100.0)
+        ramjet_max_thrust_n = st.number_input("Ramjet maximum thrust N", value=0.0, min_value=0.0, step=500.0)
+        ramjet_max_burn_time = st.number_input("Ramjet max burn time s", value=0.0, min_value=0.0, step=0.1)
+        ramjet_idle_fuel_rate = st.number_input("Ramjet idle fuel rate kg/s", value=0.0, min_value=0.0, step=0.01)
+        ramjet_max_fuel_rate = st.number_input("Ramjet max fuel rate kg/s", value=0.0, min_value=0.0, step=0.05)
+        ramjet_target_mach = st.number_input("Ramjet target / fuel-save Mach", value=0.0, min_value=0.0, step=0.1)
+        ramjet_best_mach = st.number_input("Ramjet best efficiency Mach", value=0.0, min_value=0.0, step=0.1)
+        ramjet_mach_curve_width = st.number_input("Ramjet Mach efficiency curve width", value=0.0, min_value=0.0, step=0.1)
+        ramjet_turn_aoa_loss = st.number_input("Ramjet turn / AOA intake loss", value=0.0, min_value=0.0, step=0.1)
 
     st.header("Fuel / Mass Loss")
     fuel_mass_mode = st.selectbox("Fuel mass mode", options=["No mass loss", "Known fuel mass", "Estimate from Isp"])
 
     stage_impulses = stage_impulses_for_inputs()
     known_fuel_mass_kg = 0.0
-    isp_seconds = 240.0
+    isp_seconds = 0.0
 
     if fuel_mass_mode == "Known fuel mass":
         known_fuel_mass_kg = st.number_input("Known total fuel mass kg", value=0.0, min_value=0.0, max_value=float(missile_mass_kg * 0.95), step=1.0)
 
     if fuel_mass_mode == "Estimate from Isp":
-        isp_seconds = st.number_input("Specific impulse Isp seconds", value=240.0, min_value=1.0, step=5.0)
+        isp_seconds = st.number_input("Specific impulse Isp seconds", value=0.0, min_value=0.0, step=5.0)
 
     if fuel_mass_mode == "No mass loss":
         displayed_total_fuel = 0.0
@@ -591,12 +601,12 @@ with st.sidebar:
     if motor_type == "Ramjet":
         st.caption(f"Ramjet fuel: {displayed_stage_fuel.get('ramjet', 0.0):.1f} kg")
 
-    missile_max_g = st.number_input("Missile max G", value=40.0, min_value=1.0, step=1.0)
+    missile_max_g = st.number_input("Missile max G", value=0.0, min_value=0.0, step=1.0)
 
     st.header("Missile Drag")
-    missile_diameter_m = st.number_input("Missile diameter m", value=0.178, min_value=0.01, step=0.001, format="%.3f")
-    drag_coefficient_cd = st.number_input("Drag coefficient Cd", value=0.45, min_value=0.0, step=0.01, format="%.4f")
-    turn_drag_multiplier = st.number_input("Turn drag multiplier", value=1.0, min_value=0.0, step=0.1, format="%.2f")
+    missile_diameter_m = st.number_input("Missile diameter m", value=0.0, min_value=0.0, step=0.001, format="%.3f")
+    drag_coefficient_cd = st.number_input("Drag coefficient Cd", value=0.0, min_value=0.0, step=0.01, format="%.4f")
+    turn_bleed_multiplier = st.number_input("TurnBleedMultiplier", value=0.0, min_value=0.0, step=0.1, format="%.2f")
 
     start_horizontal_range = st.number_input("Starting horizontal distance from target km", value=40.0, step=1.0)
     activation_range = st.number_input("Seeker activation range km", value=12.0, step=0.5)
@@ -604,21 +614,24 @@ with st.sidebar:
     st.header("Lofting")
     use_loft = st.checkbox("Use automatic lofting before seeker range", value=False)
     loft_angle = 0.0
-    loft_strength = 2.5
+    loft_factor = 0.0
+    loft_decay = 0.0
     if use_loft:
-        loft_angle = st.number_input("Maximum automatic loft angle degrees", value=25.0, step=1.0)
+        loft_angle = st.number_input("Loft angle degrees", value=0.0, step=1.0)
+        loft_factor = st.number_input("Loft factor", value=0.0, min_value=0.0, step=0.05)
+        loft_decay = st.number_input("Loft decay", value=0.0, min_value=0.0, step=0.1)
 
     st.header("Terminal Guidance")
-    st.write("Guidance: document-style APN")
-    nav_constant = st.number_input("Navigation constant N", value=4.0, step=0.1)
-    apn_gain = st.number_input("APN target acceleration gain", value=1.0, step=0.1)
+    st.write("Guidance: game-style APN distance scaling")
+    nav_constant = st.number_input("Navigation constant N", value=0.0, min_value=0.0, step=0.1)
+    apn_gain = st.number_input("APN target acceleration gain", value=0.0, min_value=0.0, step=0.1)
 
     st.header("LPI / Simulation")
     has_lpi = st.checkbox("Does missile have LPI", value=False)
     lpi_value = 0.0
     runs = 1
     if has_lpi:
-        lpi_value = st.number_input("Base LPI value", value=0.07, min_value=0.0, max_value=1.0, step=0.01)
+        lpi_value = st.number_input("Base LPI value", value=0.0, min_value=0.0, max_value=1.0, step=0.01)
         runs = st.number_input("Simulation runs", value=1, min_value=1, max_value=200, step=1)
 
     st.header("Playback")
@@ -929,10 +942,13 @@ def run_simulation():
                     loft_fraction = 0.0
                 loft_fraction = max(0.0, min(1.0, loft_fraction))
 
+                effective_loft_decay = loft_decay if loft_decay > 0.0 else 1.0
+                loft_curve = loft_fraction ** effective_loft_decay
+
                 horizontal_distance = math.sqrt((target_pos[0] - missile_pos[0]) ** 2 + (target_pos[1] - missile_pos[1]) ** 2)
                 max_loft_offset = math.tan(math.radians(loft_angle)) * horizontal_distance
                 max_loft_offset = min(max_loft_offset, 50000.0)
-                current_loft_offset = max_loft_offset * loft_fraction * loft_strength
+                current_loft_offset = max_loft_offset * loft_factor * loft_curve
 
                 loft_aim_point = [target_pos[0], target_pos[1], target_pos[2] + current_loft_offset]
                 desired_dir = vec_norm(vec_sub(loft_aim_point, missile_pos))
@@ -948,11 +964,16 @@ def run_simulation():
                 closing_speed = max(closing_speed, 0.0)
                 los_unit = vec_norm(rel_pos)
 
-                pn_accel = vec_mul(vec_cross(los_unit, omega), -nav_constant * closing_speed)
+                pn_scale = game_pn_n_scale(distance)
+                arm_scale = game_arm_scale(distance)
+                effective_nav_constant = nav_constant * pn_scale
+                effective_apn_gain = apn_gain * arm_scale
+
+                pn_accel = vec_mul(vec_cross(los_unit, omega), -effective_nav_constant * closing_speed)
                 target_accel_parallel = vec_mul(los_unit, vec_dot(actual_target_accel_vec, los_unit))
                 target_accel_perp = vec_sub(actual_target_accel_vec, target_accel_parallel)
                 target_accel_perp_mag = vec_mag(target_accel_perp)
-                apn_accel = vec_mul(target_accel_perp, apn_gain * nav_constant / 2.0)
+                apn_accel = vec_mul(target_accel_perp, effective_apn_gain * effective_nav_constant / 2.0)
                 commanded_accel = vec_add(pn_accel, apn_accel)
                 commanded_missile_vel = vec_add(missile_vel, vec_mul(commanded_accel, DT))
 
@@ -1057,7 +1078,7 @@ def run_simulation():
             missile_alt_km = missile_pos[2] / 1000.0
 
             base_drag_force = drag_force_newtons(missile_speed, missile_alt_km, missile_diameter_m, drag_coefficient_cd)
-            extra_turn_drag_force = turn_drag_force_newtons(base_drag_force, actual_turn_rate, turn_drag_multiplier)
+            extra_turn_drag_force = turn_drag_force_newtons(base_drag_force, actual_turn_rate, turn_bleed_multiplier)
             total_drag_force = base_drag_force + extra_turn_drag_force
             drag_accel_ms2 = total_drag_force / current_mass_kg
 
@@ -1336,7 +1357,7 @@ if run_button:
                 f"Motor accel: {result['final_motor_accel'][i]:.1f} m/s²<br>"
                 f"Turn: {result['final_turn_rate'][i]:.1f}°/s<br>"
                 f"Aero drag: {result['final_aero_drag_force'][i]:.0f} N<br>"
-                f"Turn drag: {result['final_turn_drag_force'][i]:.0f} N<br>"
+                f"Turn bleed: {result['final_turn_drag_force'][i]:.0f} N<br>"
                 f"Total drag: {result['final_total_drag_force'][i]:.0f} N<br>"
                 f"Drag accel: {result['final_drag_accel'][i]:.1f} m/s²<br>"
                 f"{ramjet_text}"
@@ -1382,7 +1403,7 @@ if run_button:
             f"Booster burn: {booster_burn_time:.1f}s<br>"
             f"Diameter: {missile_diameter_m:.3f} m<br>"
             f"Cd: {drag_coefficient_cd:.4f}<br>"
-            f"Turn drag: {turn_drag_multiplier:.2f}x"
+            f"TurnBleedMultiplier: {turn_bleed_multiplier:.2f}x"
         )
 
         if motor_type == "Normal rocket" and use_sustainer:
