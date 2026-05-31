@@ -250,86 +250,6 @@ def estimate_tti_seconds(target_pos, missile_pos, target_vel, missile_vel):
 
 
 # ----------------------------
-# Ramjet helpers
-# ----------------------------
-
-def ramjet_mach_efficiency(mach, optimal_mach, curve_width):
-    # Game-style simplified intake/speed curve:
-    # weak below about Mach 1, best near optimal Mach, still usable at high Mach.
-    mach = max(0.0, mach)
-    curve_width = max(0.1, curve_width)
-
-    if mach < 0.7:
-        low_speed_ramp = 0.0
-    elif mach < 1.5:
-        low_speed_ramp = (mach - 0.7) / 0.8
-    else:
-        low_speed_ramp = 1.0
-
-    bell = math.exp(-((mach - optimal_mach) / curve_width) ** 2)
-    high_speed_floor = 0.35
-
-    return max(0.0, min(1.0, max(high_speed_floor, bell) * low_speed_ramp))
-
-
-def ramjet_throttle_for_target_mach(current_mach, target_mach):
-    # Tries to reach target Mach, then goes idle to save fuel.
-    error = target_mach - current_mach
-
-    if error > 0.30:
-        return 1.0
-
-    if error > 0.0:
-        return 0.20 + (error / 0.30) * 0.80
-
-    return 0.0
-
-
-def ramjet_turn_penalty(turn_rate_deg_s, turn_loss_strength):
-    # Hard turns / high AOA reduce intake efficiency.
-    if turn_loss_strength <= 0.0:
-        return 1.0
-
-    turn_factor = (max(0.0, turn_rate_deg_s) / 100.0) ** 2
-    return 1.0 / (1.0 + turn_loss_strength * turn_factor)
-
-
-def ramjet_values(
-    mach,
-    alt_km,
-    turn_rate_deg_s,
-    target_mach,
-    optimal_mach,
-    curve_width,
-    min_thrust_n,
-    max_thrust_n,
-    idle_fuel_rate,
-    max_fuel_rate,
-    turn_loss_strength,
-):
-    throttle = ramjet_throttle_for_target_mach(mach, target_mach)
-
-    commanded_thrust = min_thrust_n + throttle * (max_thrust_n - min_thrust_n)
-    commanded_fuel_rate = idle_fuel_rate + throttle * (max_fuel_rate - idle_fuel_rate)
-
-    density_factor = air_density_factor(alt_km)
-    mach_eff = ramjet_mach_efficiency(mach, optimal_mach, curve_width)
-    turn_penalty = ramjet_turn_penalty(turn_rate_deg_s, turn_loss_strength)
-
-    effective_thrust = commanded_thrust * density_factor * mach_eff * turn_penalty
-
-    return {
-        "throttle": throttle,
-        "fuel_rate": commanded_fuel_rate,
-        "density_factor": density_factor,
-        "mach_efficiency": mach_eff,
-        "turn_penalty": turn_penalty,
-        "commanded_thrust": commanded_thrust,
-        "effective_thrust": effective_thrust,
-    }
-
-
-# ----------------------------
 # Animation
 # ----------------------------
 
@@ -485,25 +405,11 @@ with st.sidebar:
 
     missile_mass_kg = st.number_input("Missile total mass kg", value=168.0, min_value=1.0, step=1.0)
 
-    st.header("Motor")
+    st.header("Motor / Dual Pulse")
+    first_pulse_thrust_n = st.number_input("First pulse thrust N", value=19500.0, min_value=0.0, step=500.0)
+    first_pulse_burn_time = st.number_input("First pulse burn time s", value=8.0, min_value=0.0, step=0.5)
 
-    use_ramjet = st.checkbox("Use ramjet motor", value=False)
-
-    first_pulse_thrust_n = st.number_input(
-        "Booster / first pulse thrust N",
-        value=22000.0 if use_ramjet else 19500.0,
-        min_value=0.0,
-        step=500.0,
-    )
-
-    first_pulse_burn_time = st.number_input(
-        "Booster / first pulse burn time s",
-        value=3.0 if use_ramjet else 8.0,
-        min_value=0.0,
-        step=0.5,
-    )
-
-    use_dual_pulse = False
+    use_dual_pulse = st.checkbox("Use dual pulse second motor", value=False)
     second_pulse_thrust_n = 0.0
     second_pulse_burn_time = 0.0
     second_pulse_trigger_mode = "After flight time"
@@ -511,42 +417,17 @@ with st.sidebar:
     second_pulse_trigger_distance = 20.0
     second_pulse_trigger_tti = 40.0
 
-    ramjet_min_thrust_n = 3900.0
-    ramjet_max_thrust_n = 16000.0
-    ramjet_max_burn_time = 35.0
-    ramjet_idle_fuel_rate = 0.11
-    ramjet_max_fuel_rate = 1.10
-    ramjet_target_mach = 4.0
-    ramjet_optimal_mach = 2.3
-    ramjet_mach_curve_width = 1.5
-    ramjet_turn_loss_strength = 1.0
+    if use_dual_pulse:
+        second_pulse_thrust_n = st.number_input("Second pulse thrust N", value=12000.0, min_value=0.0, step=500.0)
+        second_pulse_burn_time = st.number_input("Second pulse burn time s", value=4.0, min_value=0.0, step=0.5)
+        second_pulse_trigger_mode = st.selectbox("Second pulse trigger mode", options=["After flight time", "At target distance", "Time to target estimate"])
 
-    if use_ramjet:
-        st.subheader("Ramjet")
-        ramjet_min_thrust_n = st.number_input("Ramjet minimum / idle thrust N", value=3900.0, min_value=0.0, step=100.0)
-        ramjet_max_thrust_n = st.number_input("Ramjet maximum thrust N", value=16000.0, min_value=0.0, step=500.0)
-        ramjet_max_burn_time = st.number_input("Ramjet maximum burn time s", value=33.3, min_value=0.0, step=0.1, format="%.1f")
-        ramjet_idle_fuel_rate = st.number_input("Ramjet idle fuel rate kg/s", value=0.11, min_value=0.0, step=0.01, format="%.2f")
-        ramjet_max_fuel_rate = st.number_input("Ramjet maximum fuel rate kg/s", value=1.10, min_value=0.0, step=0.05, format="%.2f")
-        ramjet_target_mach = st.number_input("Ramjet target / fuel-save Mach", value=4.0, min_value=0.1, step=0.1)
-        ramjet_optimal_mach = st.number_input("Ramjet best efficiency Mach", value=2.3, min_value=0.1, step=0.1)
-        ramjet_mach_curve_width = st.number_input("Ramjet Mach efficiency curve width", value=1.5, min_value=0.1, step=0.1)
-        ramjet_turn_loss_strength = st.number_input("Ramjet turn / AOA intake loss", value=1.0, min_value=0.0, step=0.1)
-    else:
-        st.subheader("Dual Pulse")
-        use_dual_pulse = st.checkbox("Use dual pulse second motor", value=False)
-
-        if use_dual_pulse:
-            second_pulse_thrust_n = st.number_input("Second pulse thrust N", value=12000.0, min_value=0.0, step=500.0)
-            second_pulse_burn_time = st.number_input("Second pulse burn time s", value=4.0, min_value=0.0, step=0.5)
-            second_pulse_trigger_mode = st.selectbox("Second pulse trigger mode", options=["After flight time", "At target distance", "Time to target estimate"])
-
-            if second_pulse_trigger_mode == "After flight time":
-                second_pulse_trigger_time = st.number_input("Start second pulse after flight time s", value=20.0, min_value=0.0, step=1.0)
-            elif second_pulse_trigger_mode == "At target distance":
-                second_pulse_trigger_distance = st.number_input("Start second pulse when target distance is km", value=20.0, min_value=0.0, step=1.0)
-            elif second_pulse_trigger_mode == "Time to target estimate":
-                second_pulse_trigger_tti = st.number_input("Start second pulse when estimated time to target is s", value=40.0, min_value=0.0, step=1.0)
+        if second_pulse_trigger_mode == "After flight time":
+            second_pulse_trigger_time = st.number_input("Start second pulse after flight time s", value=20.0, min_value=0.0, step=1.0)
+        elif second_pulse_trigger_mode == "At target distance":
+            second_pulse_trigger_distance = st.number_input("Start second pulse when target distance is km", value=20.0, min_value=0.0, step=1.0)
+        elif second_pulse_trigger_mode == "Time to target estimate":
+            second_pulse_trigger_tti = st.number_input("Start second pulse when estimated time to target is s", value=40.0, min_value=0.0, step=1.0)
 
     st.header("Fuel / Mass Loss")
     fuel_mass_mode = st.selectbox("Fuel mass mode", options=["No mass loss", "Known fuel mass", "Estimate from Isp"])
@@ -554,17 +435,12 @@ with st.sidebar:
     isp_seconds = 240.0
 
     if fuel_mass_mode == "Known fuel mass":
-        known_fuel_mass_kg = st.number_input("Known total fuel mass kg", value=35.0 if use_ramjet else 0.0, min_value=0.0, max_value=float(missile_mass_kg * 0.95), step=1.0)
+        known_fuel_mass_kg = st.number_input("Known total fuel mass kg", value=0.0, min_value=0.0, max_value=float(missile_mass_kg * 0.95), step=1.0)
     if fuel_mass_mode == "Estimate from Isp":
         isp_seconds = st.number_input("Specific impulse Isp seconds", value=240.0, min_value=1.0, step=5.0)
 
     second_fuel_thrust_for_calc = second_pulse_thrust_n if use_dual_pulse else 0.0
     second_fuel_time_for_calc = second_pulse_burn_time if use_dual_pulse else 0.0
-
-    if use_ramjet:
-        # Estimate ramjet propellant from the ramjet's max-thrust impulse if fuel mass is unknown.
-        second_fuel_thrust_for_calc = ramjet_max_thrust_n
-        second_fuel_time_for_calc = ramjet_max_burn_time
 
     if fuel_mass_mode == "No mass loss":
         displayed_total_fuel = 0.0
@@ -579,18 +455,17 @@ with st.sidebar:
 
     st.caption(f"Fuel mass: {displayed_total_fuel:.1f} kg")
     st.caption(f"Dry mass: {displayed_dry_mass:.1f} kg")
-    st.caption(f"Booster / first pulse fuel: {displayed_first_fuel:.1f} kg")
+    st.caption(f"First pulse fuel: {displayed_first_fuel:.1f} kg")
     if use_dual_pulse:
         st.caption(f"Second pulse fuel: {displayed_second_fuel:.1f} kg")
-    if use_ramjet:
-        st.caption(f"Ramjet fuel: {displayed_second_fuel:.1f} kg")
 
     missile_max_g = st.number_input("Missile max G", value=40.0, min_value=1.0, step=1.0)
 
     st.header("Missile Drag")
-    missile_diameter_m = st.number_input("Missile diameter m", value=0.178, min_value=0.01, step=0.001, format="%.3f")
-    drag_coefficient_cd = st.number_input("Drag coefficient Cd", value=0.45, min_value=0.01, step=0.05, format="%.2f")
-    turn_drag_multiplier = st.number_input("Turn drag multiplier", value=1.0, min_value=0.0, step=0.1, format="%.2f")
+    missile_diameter_m = st.number_input("Missile diameter m", value=0.178, min_value=0.01, step=0.001, format="%.3f", help="Body diameter of the missile.")
+    drag_coefficient_cd = st.number_input("Drag coefficient Cd", value=0.45, min_value=0.01, step=0.05, format="%.2f", help="Higher = more drag. Use this as the main tuning value.")
+    turn_drag_multiplier = st.number_input("Turn drag multiplier", value=1.0, min_value=0.0, step=0.1, format="%.2f", help="Extra drag while turning. 0 disables turn drag.")
+    st.caption("Drag uses force: air density × speed² × Cd × frontal area. No Mach/sec drag.")
 
     start_horizontal_range = st.number_input("Starting horizontal distance from target km", value=40.0, step=1.0)
     activation_range = st.number_input("Seeker activation range km", value=12.0, step=0.5)
@@ -638,11 +513,6 @@ def run_simulation():
     second_calc_thrust = second_pulse_thrust_n if use_dual_pulse else 0.0
     second_calc_time = second_pulse_burn_time if use_dual_pulse else 0.0
 
-    if use_ramjet:
-        # If fuel is estimated, treat ramjet max thrust over max burn time as its equivalent impulse.
-        second_calc_thrust = ramjet_max_thrust_n
-        second_calc_time = ramjet_max_burn_time
-
     if fuel_mass_mode == "No mass loss":
         total_fuel_kg = 0.0
     elif fuel_mass_mode == "Known fuel mass":
@@ -665,8 +535,6 @@ def run_simulation():
     all_angle_change_times = []
     all_second_pulse_times = []
     all_second_pulse_tti = []
-    all_ramjet_start_times = []
-    all_ramjet_out_times = []
 
     final_data = None
 
@@ -675,10 +543,6 @@ def run_simulation():
         remaining_second_fuel = initial_second_fuel_kg
         second_pulse_started = False
         second_pulse_start_time = None
-        ramjet_started = False
-        ramjet_start_time = None
-        ramjet_out_recorded = False
-        last_turn_rate_for_ramjet = 0.0
 
         missile_mach = launch_platform_mach
         target_mach = target_mach_start
@@ -719,9 +583,6 @@ def run_simulation():
             "total_drag_force": [], "drag_accel": [], "turn_rate": [], "thrust": [],
             "motor_accel": [], "target_accel": [], "target_accel_perp": [],
             "current_mass": [], "remaining_fuel": [], "tti": [],
-            "ramjet_throttle": [], "ramjet_mach_efficiency": [],
-            "ramjet_turn_penalty": [], "ramjet_fuel_rate": [],
-            "ramjet_commanded_thrust": [],
         }
 
         markers = {
@@ -730,15 +591,13 @@ def run_simulation():
             "second_pulse_time": None, "second_pulse_tti": None, "intercepted": False,
             "end_time": None, "end_distance": None, "activation_to_intercept_time": None,
             "ping_point": None, "ping_distance": None, "ping_time": None,
-            "ramjet_start_point": None, "ramjet_start_time": None,
-            "ramjet_out_time": None,
         }
 
         def record_point(phase_text, target_phase_text, current_stage, current_thrust_n,
                          motor_accel_ms2, actual_target_accel_vec, target_accel_perp_mag,
                          current_mass_kg, remaining_total_fuel, actual_turn_rate,
                          base_drag_force, extra_turn_drag_force, total_drag_force,
-                         drag_accel_ms2, current_tti, ramjet_info):
+                         drag_accel_ms2, current_tti):
             data["mx"].append(missile_pos[0] / 1000.0)
             data["my"].append(missile_pos[1] / 1000.0)
             data["mz"].append(missile_pos[2] / 1000.0)
@@ -768,11 +627,6 @@ def run_simulation():
             data["current_mass"].append(current_mass_kg)
             data["remaining_fuel"].append(remaining_total_fuel)
             data["tti"].append(current_tti)
-            data["ramjet_throttle"].append(ramjet_info.get("throttle", 0.0))
-            data["ramjet_mach_efficiency"].append(ramjet_info.get("mach_efficiency", 0.0))
-            data["ramjet_turn_penalty"].append(ramjet_info.get("turn_penalty", 1.0))
-            data["ramjet_fuel_rate"].append(ramjet_info.get("fuel_rate", 0.0))
-            data["ramjet_commanded_thrust"].append(ramjet_info.get("commanded_thrust", 0.0))
 
         while time <= MAX_TIME:
             prev_target_pos = target_pos[:]
@@ -925,62 +779,17 @@ def run_simulation():
                 if second_pulse_elapsed < second_pulse_burn_time:
                     second_pulse_burning = True
 
-            ramjet_info = {
-                "throttle": 0.0,
-                "fuel_rate": 0.0,
-                "mach_efficiency": 0.0,
-                "turn_penalty": 1.0,
-                "commanded_thrust": 0.0,
-                "effective_thrust": 0.0,
-            }
-
-            ramjet_burning = False
-            if use_ramjet and not first_pulse_burning:
-                if not ramjet_started:
-                    ramjet_started = True
-                    ramjet_start_time = time
-                    all_ramjet_start_times.append(time)
-                    markers["ramjet_start_point"] = (missile_pos[0] / 1000.0, missile_pos[1] / 1000.0, missile_pos[2] / 1000.0)
-                    markers["ramjet_start_time"] = time
-
-                ramjet_elapsed = time - ramjet_start_time if ramjet_start_time is not None else 0.0
-                ramjet_time_left = ramjet_max_burn_time <= 0.0 or ramjet_elapsed < ramjet_max_burn_time
-                ramjet_has_fuel = fuel_mass_mode == "No mass loss" or remaining_second_fuel > 0.0
-
-                if ramjet_time_left and ramjet_has_fuel:
-                    ramjet_burning = True
-                    ramjet_info = ramjet_values(
-                        missile_mach,
-                        missile_pos[2] / 1000.0,
-                        last_turn_rate_for_ramjet,
-                        ramjet_target_mach,
-                        ramjet_optimal_mach,
-                        ramjet_mach_curve_width,
-                        ramjet_min_thrust_n,
-                        ramjet_max_thrust_n,
-                        ramjet_idle_fuel_rate,
-                        ramjet_max_fuel_rate,
-                        ramjet_turn_loss_strength,
-                    )
-                elif ramjet_started and not ramjet_out_recorded:
-                    ramjet_out_recorded = True
-                    all_ramjet_out_times.append(time)
-                    markers["ramjet_out_time"] = time
-
             current_stage = "off"
             current_thrust_n = 0.0
             if first_pulse_burning:
-                current_stage = "booster" if use_ramjet else "first pulse"
+                current_stage = "first pulse"
                 current_thrust_n = first_pulse_thrust_n
-            elif ramjet_burning:
-                current_stage = "ramjet"
-                current_thrust_n = ramjet_info["effective_thrust"]
             elif second_pulse_burning:
                 current_stage = "second pulse"
                 current_thrust_n = second_pulse_thrust_n
 
             if fuel_mass_mode != "No mass loss":
-                if current_stage in ["first pulse", "booster"]:
+                if current_stage == "first pulse":
                     if first_pulse_burn_time > 0 and initial_first_fuel_kg > 0 and remaining_first_fuel > 0:
                         burn_rate = initial_first_fuel_kg / first_pulse_burn_time
                         fuel_to_burn = min(remaining_first_fuel, burn_rate * DT)
@@ -994,21 +803,11 @@ def run_simulation():
                         remaining_second_fuel -= fuel_to_burn
                     else:
                         current_thrust_n = 0.0
-                elif current_stage == "ramjet":
-                    fuel_to_burn = min(remaining_second_fuel, ramjet_info["fuel_rate"] * DT)
-                    remaining_second_fuel -= fuel_to_burn
-                    if remaining_second_fuel <= 0.0:
-                        remaining_second_fuel = 0.0
 
-                if current_stage in ["first pulse", "booster"] and remaining_first_fuel <= 0:
+                if current_stage == "first pulse" and remaining_first_fuel <= 0:
                     current_thrust_n = 0.0
                 if current_stage == "second pulse" and remaining_second_fuel <= 0:
                     current_thrust_n = 0.0
-                if current_stage == "ramjet" and remaining_second_fuel <= 0 and ramjet_info["fuel_rate"] > 0:
-                    if not ramjet_out_recorded:
-                        ramjet_out_recorded = True
-                        all_ramjet_out_times.append(time)
-                        markers["ramjet_out_time"] = time
 
                 current_mass_kg = dry_mass_kg + remaining_first_fuel + remaining_second_fuel
                 remaining_total_fuel = remaining_first_fuel + remaining_second_fuel
@@ -1074,7 +873,7 @@ def run_simulation():
                 record_point(phase, target_phase, current_stage, current_thrust_n, motor_accel_ms2,
                              actual_target_accel_vec, target_accel_perp_mag, current_mass_kg,
                              remaining_total_fuel, actual_turn_rate, base_drag_force,
-                             extra_turn_drag_force, total_drag_force, drag_accel_ms2, current_tti, ramjet_info)
+                             extra_turn_drag_force, total_drag_force, drag_accel_ms2, current_tti)
                 break
 
             if reached_activation_range:
@@ -1094,7 +893,7 @@ def run_simulation():
             record_point(phase, target_phase, current_stage, current_thrust_n, motor_accel_ms2,
                          actual_target_accel_vec, target_accel_perp_mag, current_mass_kg,
                          remaining_total_fuel, actual_turn_rate, base_drag_force,
-                         extra_turn_drag_force, total_drag_force, drag_accel_ms2, current_tti, ramjet_info)
+                         extra_turn_drag_force, total_drag_force, drag_accel_ms2, current_tti)
 
             time += DT
 
@@ -1153,8 +952,6 @@ def run_simulation():
         "all_angle_change_times": all_angle_change_times,
         "all_second_pulse_times": all_second_pulse_times,
         "avg_second_pulse_tti": avg_second_pulse_tti,
-        "all_ramjet_start_times": all_ramjet_start_times,
-        "all_ramjet_out_times": all_ramjet_out_times,
 
         "final_mx": data.get("mx", []),
         "final_my": data.get("my", []),
@@ -1184,11 +981,6 @@ def run_simulation():
         "final_current_mass": data.get("current_mass", []),
         "final_remaining_fuel": data.get("remaining_fuel", []),
         "final_tti": data.get("tti", []),
-        "final_ramjet_throttle": data.get("ramjet_throttle", []),
-        "final_ramjet_mach_efficiency": data.get("ramjet_mach_efficiency", []),
-        "final_ramjet_turn_penalty": data.get("ramjet_turn_penalty", []),
-        "final_ramjet_fuel_rate": data.get("ramjet_fuel_rate", []),
-        "final_ramjet_commanded_thrust": data.get("ramjet_commanded_thrust", []),
 
         "final_ping_point": markers.get("ping_point"),
         "final_ping_distance": markers.get("ping_distance"),
@@ -1206,9 +998,6 @@ def run_simulation():
         "final_second_pulse_point": markers.get("second_pulse_point"),
         "final_second_pulse_time": markers.get("second_pulse_time"),
         "final_second_pulse_tti": markers.get("second_pulse_tti"),
-        "final_ramjet_start_point": markers.get("ramjet_start_point"),
-        "final_ramjet_start_time": markers.get("ramjet_start_time"),
-        "final_ramjet_out_time": markers.get("ramjet_out_time"),
         "final_intercepted": markers.get("intercepted", False),
         "final_end_time": markers.get("end_time"),
         "final_end_distance": markers.get("end_distance"),
@@ -1249,22 +1038,11 @@ if run_button:
         else:
             st.write("Second pulse never started.")
 
-    if use_ramjet:
-        if result["all_ramjet_start_times"]:
-            st.write(f"Ramjet started at: **{sum(result['all_ramjet_start_times']) / len(result['all_ramjet_start_times']):.2f} sec**")
-        else:
-            st.write("Ramjet never started.")
-
-        if result["all_ramjet_out_times"]:
-            st.write(f"Ramjet stopped / fuel ended at: **{sum(result['all_ramjet_out_times']) / len(result['all_ramjet_out_times']):.2f} sec**")
-
     st.write(f"Fuel mass: **{result['total_fuel_kg']:.2f} kg**")
     st.write(f"Dry mass: **{result['dry_mass_kg']:.2f} kg**")
-    st.write(f"Booster / first pulse fuel: **{result['initial_first_fuel_kg']:.2f} kg**")
+    st.write(f"First pulse fuel: **{result['initial_first_fuel_kg']:.2f} kg**")
     if use_dual_pulse:
         st.write(f"Second pulse fuel: **{result['initial_second_fuel_kg']:.2f} kg**")
-    if use_ramjet:
-        st.write(f"Ramjet fuel: **{result['initial_second_fuel_kg']:.2f} kg**")
 
     st.write(f"Missile diameter: **{missile_diameter_m:.3f} m**")
     st.write(f"Drag coefficient Cd: **{drag_coefficient_cd:.2f}**")
@@ -1315,13 +1093,6 @@ if run_button:
                 f"Mass: {result['final_current_mass'][i]:.1f} kg<br>"
                 f"Fuel: {result['final_remaining_fuel'][i]:.1f} kg<br>"
                 f"Thrust: {result['final_thrust'][i]:.0f} N<br>"
-                + (
-                    f"RJ throttle: {result['final_ramjet_throttle'][i]:.2f}<br>"
-                    f"RJ fuel: {result['final_ramjet_fuel_rate'][i]:.2f} kg/s<br>"
-                    f"RJ Mach eff: {result['final_ramjet_mach_efficiency'][i]:.2f}<br>"
-                    f"RJ turn eff: {result['final_ramjet_turn_penalty'][i]:.2f}<br>"
-                    if use_ramjet else ""
-                ) +
                 f"Motor accel: {result['final_motor_accel'][i]:.1f} m/s²<br>"
                 f"G limit: {missile_max_g:.1f}<br>"
                 f"Turn: {result['final_turn_rate'][i]:.1f}°/s<br>"
@@ -1386,15 +1157,6 @@ if run_button:
             elif second_pulse_trigger_mode == "Time to target estimate":
                 launch_hover += f"<br>Trigger TTI: {second_pulse_trigger_tti:.1f}s"
 
-        if use_ramjet:
-            launch_hover += (
-                f"<br>Ramjet min/max: {ramjet_min_thrust_n:.0f}/{ramjet_max_thrust_n:.0f} N"
-                f"<br>Ramjet burn cap: {ramjet_max_burn_time:.1f}s"
-                f"<br>Ramjet target Mach: {ramjet_target_mach:.1f}"
-                f"<br>Ramjet best Mach: {ramjet_optimal_mach:.1f}"
-                f"<br>Ramjet fuel rate: {ramjet_idle_fuel_rate:.2f}-{ramjet_max_fuel_rate:.2f} kg/s"
-            )
-
         if use_manual_launch:
             launch_hover += f"<br>H offset: {launch_horizontal_offset_deg:.1f}°<br>V angle: {launch_vertical_angle_deg:.1f}°"
 
@@ -1409,21 +1171,6 @@ if run_button:
         if result["final_activation_point"] is not None:
             p = result["final_activation_point"]
             fig.add_trace(go.Scatter3d(x=[p[0]], y=[p[1]], z=[p[2]], mode="markers+text", name="Seeker activation range marker", text=["Seeker"], marker=dict(size=9), hovertext=[f"Seeker activation<br>Range: {activation_range:.2f} km<br>t: {result['final_activation_time']:.2f}s"], hoverinfo="text"))
-
-        if use_ramjet and result["final_ramjet_start_point"] is not None:
-            p = result["final_ramjet_start_point"]
-            fig.add_trace(go.Scatter3d(
-                x=[p[0]], y=[p[1]], z=[p[2]],
-                mode="markers+text", name="Ramjet start", text=["Ramjet"], marker=dict(size=9),
-                hovertext=[
-                    f"Ramjet start<br>"
-                    f"t: {result['final_ramjet_start_time']:.2f}s<br>"
-                    f"Min/max thrust: {ramjet_min_thrust_n:.0f}/{ramjet_max_thrust_n:.0f} N<br>"
-                    f"Target Mach: {ramjet_target_mach:.1f}<br>"
-                    f"Best Mach: {ramjet_optimal_mach:.1f}"
-                ],
-                hoverinfo="text",
-            ))
 
         if use_dual_pulse and result["final_second_pulse_point"] is not None:
             p = result["final_second_pulse_point"]
