@@ -15,7 +15,6 @@ MAX_TIME = 300.0
 
 USE_GRAVITY = True
 GRAVITY = 9.81
-
 NOTCH_BREAK_TIME = 1.2
 
 SEA_LEVEL_DENSITY = 1.225
@@ -102,7 +101,6 @@ def air_density_factor(alt_km):
         return 0.0
 
     density_factor = (1.0 - 2.25577e-5 * altitude_m) ** 5.25588
-
     return max(0.0, density_factor)
 
 
@@ -118,7 +116,6 @@ def frontal_area_m2(diameter_m):
 def drag_force_newtons(speed_ms, alt_km, diameter_m, cd):
     rho = air_density_kg_m3(alt_km)
     area = frontal_area_m2(diameter_m)
-
     return 0.5 * rho * speed_ms * speed_ms * cd * area
 
 
@@ -127,7 +124,6 @@ def turn_drag_force_newtons(base_drag_force, turn_rate_deg_s, turn_drag_multipli
         return 0.0
 
     turn_factor = (max(0.0, turn_rate_deg_s) / 100.0) ** 2
-
     return base_drag_force * turn_drag_multiplier * turn_factor
 
 
@@ -200,30 +196,8 @@ def limit_missile_g(old_vel, commanded_vel, max_g, dt):
     return vec_mul(limited_dir, commanded_speed)
 
 
-def motor_stage_at_time(time_s, booster_time, sustainer_time):
-    if time_s < booster_time:
-        return "booster"
-
-    if time_s < booster_time + sustainer_time:
-        return "sustainer"
-
-    return "off"
-
-
-def motor_thrust_at_time(time_s, booster_thrust, booster_time, sustainer_thrust, sustainer_time):
-    stage = motor_stage_at_time(time_s, booster_time, sustainer_time)
-
-    if stage == "booster":
-        return booster_thrust
-
-    if stage == "sustainer":
-        return sustainer_thrust
-
-    return 0.0
-
-
-def estimate_total_fuel_from_isp(booster_thrust, booster_time, sustainer_thrust, sustainer_time, isp_seconds):
-    total_impulse = booster_thrust * booster_time + sustainer_thrust * sustainer_time
+def estimate_total_fuel_from_isp(first_thrust, first_time, second_thrust, second_time, isp_seconds):
+    total_impulse = first_thrust * first_time + second_thrust * second_time
 
     if total_impulse <= 0 or isp_seconds <= 0:
         return 0.0
@@ -231,18 +205,18 @@ def estimate_total_fuel_from_isp(booster_thrust, booster_time, sustainer_thrust,
     return total_impulse / (isp_seconds * GRAVITY)
 
 
-def split_fuel_by_impulse(total_fuel, booster_thrust, booster_time, sustainer_thrust, sustainer_time):
-    booster_impulse = booster_thrust * booster_time
-    sustainer_impulse = sustainer_thrust * sustainer_time
-    total_impulse = booster_impulse + sustainer_impulse
+def split_fuel_by_impulse(total_fuel, first_thrust, first_time, second_thrust, second_time):
+    first_impulse = first_thrust * first_time
+    second_impulse = second_thrust * second_time
+    total_impulse = first_impulse + second_impulse
 
     if total_impulse <= 0 or total_fuel <= 0:
         return 0.0, 0.0
 
-    booster_fuel = total_fuel * booster_impulse / total_impulse
-    sustainer_fuel = total_fuel * sustainer_impulse / total_impulse
+    first_fuel = total_fuel * first_impulse / total_impulse
+    second_fuel = total_fuel * second_impulse / total_impulse
 
-    return booster_fuel, sustainer_fuel
+    return first_fuel, second_fuel
 
 
 def choose_notch_side(target_pos, missile_pos, current_target_dir):
@@ -260,8 +234,7 @@ def choose_notch_side(target_pos, missile_pos, current_target_dir):
     right_notch = [los[1], -los[0], 0]
     left_notch = [-los[1], los[0], 0]
 
-    current_horizontal = [current_target_dir[0], current_target_dir[1], 0]
-    current_horizontal = vec_norm(current_horizontal)
+    current_horizontal = vec_norm([current_target_dir[0], current_target_dir[1], 0])
 
     if vec_mag(current_horizontal) < 1e-9:
         current_horizontal = [1, 0, 0]
@@ -604,11 +577,65 @@ with st.sidebar:
 
     missile_mass_kg = st.number_input("Missile total mass kg", value=168.0, min_value=1.0, step=1.0)
 
-    booster_thrust_n = st.number_input("Booster thrust N", value=19500.0, min_value=0.0, step=500.0)
-    booster_burn_time = st.number_input("Booster burn time s", value=8.0, min_value=0.0, step=0.5)
+    st.header("Motor / Dual Pulse")
 
-    sustainer_thrust_n = st.number_input("Sustainer thrust N", value=0.0, min_value=0.0, step=500.0)
-    sustainer_burn_time = st.number_input("Sustainer burn time s", value=0.0, min_value=0.0, step=0.5)
+    first_pulse_thrust_n = st.number_input(
+        "First pulse thrust N",
+        value=19500.0,
+        min_value=0.0,
+        step=500.0
+    )
+
+    first_pulse_burn_time = st.number_input(
+        "First pulse burn time s",
+        value=8.0,
+        min_value=0.0,
+        step=0.5
+    )
+
+    use_dual_pulse = st.checkbox("Use dual pulse second motor", value=False)
+
+    second_pulse_thrust_n = 0.0
+    second_pulse_burn_time = 0.0
+    second_pulse_trigger_mode = "After flight time"
+    second_pulse_trigger_time = 20.0
+    second_pulse_trigger_distance = 20.0
+
+    if use_dual_pulse:
+        second_pulse_thrust_n = st.number_input(
+            "Second pulse thrust N",
+            value=12000.0,
+            min_value=0.0,
+            step=500.0
+        )
+
+        second_pulse_burn_time = st.number_input(
+            "Second pulse burn time s",
+            value=4.0,
+            min_value=0.0,
+            step=0.5
+        )
+
+        second_pulse_trigger_mode = st.selectbox(
+            "Second pulse trigger mode",
+            options=["After flight time", "At target distance"]
+        )
+
+        if second_pulse_trigger_mode == "After flight time":
+            second_pulse_trigger_time = st.number_input(
+                "Start second pulse after flight time s",
+                value=20.0,
+                min_value=0.0,
+                step=1.0
+            )
+
+        if second_pulse_trigger_mode == "At target distance":
+            second_pulse_trigger_distance = st.number_input(
+                "Start second pulse when target distance is km",
+                value=20.0,
+                min_value=0.0,
+                step=1.0
+            )
 
     st.header("Fuel / Mass Loss")
 
@@ -637,33 +664,37 @@ with st.sidebar:
             step=5.0
         )
 
+    second_fuel_thrust_for_calc = second_pulse_thrust_n if use_dual_pulse else 0.0
+    second_fuel_time_for_calc = second_pulse_burn_time if use_dual_pulse else 0.0
+
     if fuel_mass_mode == "No mass loss":
         displayed_total_fuel = 0.0
     elif fuel_mass_mode == "Known fuel mass":
         displayed_total_fuel = min(known_fuel_mass_kg, missile_mass_kg * 0.95)
     else:
         displayed_total_fuel = estimate_total_fuel_from_isp(
-            booster_thrust_n,
-            booster_burn_time,
-            sustainer_thrust_n,
-            sustainer_burn_time,
+            first_pulse_thrust_n,
+            first_pulse_burn_time,
+            second_fuel_thrust_for_calc,
+            second_fuel_time_for_calc,
             isp_seconds
         )
         displayed_total_fuel = min(displayed_total_fuel, missile_mass_kg * 0.80)
 
     displayed_dry_mass = missile_mass_kg - displayed_total_fuel
-    displayed_booster_fuel, displayed_sustainer_fuel = split_fuel_by_impulse(
+    displayed_first_fuel, displayed_second_fuel = split_fuel_by_impulse(
         displayed_total_fuel,
-        booster_thrust_n,
-        booster_burn_time,
-        sustainer_thrust_n,
-        sustainer_burn_time
+        first_pulse_thrust_n,
+        first_pulse_burn_time,
+        second_fuel_thrust_for_calc,
+        second_fuel_time_for_calc
     )
 
     st.caption(f"Fuel mass: {displayed_total_fuel:.1f} kg")
     st.caption(f"Dry mass: {displayed_dry_mass:.1f} kg")
-    st.caption(f"Booster fuel: {displayed_booster_fuel:.1f} kg")
-    st.caption(f"Sustainer fuel: {displayed_sustainer_fuel:.1f} kg")
+    st.caption(f"First pulse fuel: {displayed_first_fuel:.1f} kg")
+    if use_dual_pulse:
+        st.caption(f"Second pulse fuel: {displayed_second_fuel:.1f} kg")
 
     missile_max_g = st.number_input("Missile max G", value=40.0, min_value=1.0, step=1.0)
 
@@ -767,28 +798,31 @@ def run_simulation():
 
     target_max_speed = target_max_mach * sound_speed
 
+    second_calc_thrust = second_pulse_thrust_n if use_dual_pulse else 0.0
+    second_calc_time = second_pulse_burn_time if use_dual_pulse else 0.0
+
     if fuel_mass_mode == "No mass loss":
         total_fuel_kg = 0.0
     elif fuel_mass_mode == "Known fuel mass":
         total_fuel_kg = min(known_fuel_mass_kg, missile_mass_kg * 0.95)
     else:
         total_fuel_kg = estimate_total_fuel_from_isp(
-            booster_thrust_n,
-            booster_burn_time,
-            sustainer_thrust_n,
-            sustainer_burn_time,
+            first_pulse_thrust_n,
+            first_pulse_burn_time,
+            second_calc_thrust,
+            second_calc_time,
             isp_seconds
         )
         total_fuel_kg = min(total_fuel_kg, missile_mass_kg * 0.80)
 
     dry_mass_kg = missile_mass_kg - total_fuel_kg
 
-    initial_booster_fuel_kg, initial_sustainer_fuel_kg = split_fuel_by_impulse(
+    initial_first_fuel_kg, initial_second_fuel_kg = split_fuel_by_impulse(
         total_fuel_kg,
-        booster_thrust_n,
-        booster_burn_time,
-        sustainer_thrust_n,
-        sustainer_burn_time
+        first_pulse_thrust_n,
+        first_pulse_burn_time,
+        second_calc_thrust,
+        second_calc_time
     )
 
     all_hit_times = []
@@ -800,6 +834,7 @@ def run_simulation():
     all_activation_distances = []
     all_notch_times = []
     all_angle_change_times = []
+    all_second_pulse_times = []
 
     final_mx, final_my, final_mz = [], [], []
     final_tx, final_ty, final_tz = [], [], []
@@ -834,6 +869,8 @@ def run_simulation():
     final_notch_point = None
     final_angle_change_point = None
     final_notch_side = None
+    final_second_pulse_point = None
+    final_second_pulse_time = None
 
     final_intercepted = False
     final_end_time = None
@@ -841,8 +878,11 @@ def run_simulation():
     final_activation_to_intercept_time = None
 
     for run in range(int(runs)):
-        remaining_booster_fuel = initial_booster_fuel_kg
-        remaining_sustainer_fuel = initial_sustainer_fuel_kg
+        remaining_first_fuel = initial_first_fuel_kg
+        remaining_second_fuel = initial_second_fuel_kg
+
+        second_pulse_started = False
+        second_pulse_start_time = None
 
         missile_mach = launch_platform_mach
         target_mach = target_mach_start
@@ -1178,45 +1218,78 @@ def run_simulation():
                 DT
             )
 
-            current_stage = motor_stage_at_time(
-                time,
-                booster_burn_time,
-                sustainer_burn_time
-            )
+            first_pulse_burning = time < first_pulse_burn_time
 
-            current_thrust_n = motor_thrust_at_time(
-                time,
-                booster_thrust_n,
-                booster_burn_time,
-                sustainer_thrust_n,
-                sustainer_burn_time
-            )
+            if use_dual_pulse and not second_pulse_started and not first_pulse_burning:
+                should_start_second_pulse = False
+
+                if second_pulse_trigger_mode == "After flight time":
+                    if time >= second_pulse_trigger_time:
+                        should_start_second_pulse = True
+
+                if second_pulse_trigger_mode == "At target distance":
+                    if distance <= second_pulse_trigger_distance * 1000:
+                        should_start_second_pulse = True
+
+                if should_start_second_pulse:
+                    second_pulse_started = True
+                    second_pulse_start_time = time
+
+                    second_pulse_point = (
+                        missile_pos[0] / 1000,
+                        missile_pos[1] / 1000,
+                        missile_pos[2] / 1000
+                    )
+
+                    all_second_pulse_times.append(time)
+
+                    if run == 0:
+                        final_second_pulse_point = second_pulse_point
+                        final_second_pulse_time = time
+
+            second_pulse_burning = False
+
+            if use_dual_pulse and second_pulse_started and second_pulse_start_time is not None:
+                second_pulse_elapsed = time - second_pulse_start_time
+                if second_pulse_elapsed < second_pulse_burn_time:
+                    second_pulse_burning = True
+
+            current_stage = "off"
+            current_thrust_n = 0.0
+
+            if first_pulse_burning:
+                current_stage = "first pulse"
+                current_thrust_n = first_pulse_thrust_n
+
+            elif second_pulse_burning:
+                current_stage = "second pulse"
+                current_thrust_n = second_pulse_thrust_n
 
             if fuel_mass_mode != "No mass loss":
-                if current_stage == "booster":
-                    if booster_burn_time > 0 and initial_booster_fuel_kg > 0 and remaining_booster_fuel > 0:
-                        burn_rate = initial_booster_fuel_kg / booster_burn_time
-                        fuel_to_burn = min(remaining_booster_fuel, burn_rate * DT)
-                        remaining_booster_fuel -= fuel_to_burn
-                    elif initial_booster_fuel_kg <= 0:
+                if current_stage == "first pulse":
+                    if first_pulse_burn_time > 0 and initial_first_fuel_kg > 0 and remaining_first_fuel > 0:
+                        burn_rate = initial_first_fuel_kg / first_pulse_burn_time
+                        fuel_to_burn = min(remaining_first_fuel, burn_rate * DT)
+                        remaining_first_fuel -= fuel_to_burn
+                    elif initial_first_fuel_kg <= 0:
                         current_thrust_n = 0.0
 
-                elif current_stage == "sustainer":
-                    if sustainer_burn_time > 0 and initial_sustainer_fuel_kg > 0 and remaining_sustainer_fuel > 0:
-                        burn_rate = initial_sustainer_fuel_kg / sustainer_burn_time
-                        fuel_to_burn = min(remaining_sustainer_fuel, burn_rate * DT)
-                        remaining_sustainer_fuel -= fuel_to_burn
-                    elif initial_sustainer_fuel_kg <= 0:
+                elif current_stage == "second pulse":
+                    if second_pulse_burn_time > 0 and initial_second_fuel_kg > 0 and remaining_second_fuel > 0:
+                        burn_rate = initial_second_fuel_kg / second_pulse_burn_time
+                        fuel_to_burn = min(remaining_second_fuel, burn_rate * DT)
+                        remaining_second_fuel -= fuel_to_burn
+                    elif initial_second_fuel_kg <= 0:
                         current_thrust_n = 0.0
 
-                if current_stage == "booster" and remaining_booster_fuel <= 0:
+                if current_stage == "first pulse" and remaining_first_fuel <= 0:
                     current_thrust_n = 0.0
 
-                if current_stage == "sustainer" and remaining_sustainer_fuel <= 0:
+                if current_stage == "second pulse" and remaining_second_fuel <= 0:
                     current_thrust_n = 0.0
 
-                current_mass_kg = dry_mass_kg + remaining_booster_fuel + remaining_sustainer_fuel
-                remaining_total_fuel = remaining_booster_fuel + remaining_sustainer_fuel
+                current_mass_kg = dry_mass_kg + remaining_first_fuel + remaining_second_fuel
+                remaining_total_fuel = remaining_first_fuel + remaining_second_fuel
             else:
                 current_mass_kg = missile_mass_kg
                 remaining_total_fuel = 0.0
@@ -1304,7 +1377,7 @@ def run_simulation():
                 missile_ms_list.append(missile_speed)
                 target_ms_list.append(target_speed)
                 distance_list.append(distance / 1000)
-                phase_list.append(phase)
+                phase_list.append(f"{phase}, {current_stage}")
 
                 if notch_started:
                     notch_elapsed = time - notch_start_time
@@ -1378,7 +1451,7 @@ def run_simulation():
             missile_ms_list.append(missile_speed)
             target_ms_list.append(target_speed)
             distance_list.append(distance / 1000)
-            phase_list.append(phase)
+            phase_list.append(f"{phase}, {current_stage}")
 
             if notch_started:
                 notch_elapsed = time - notch_start_time
@@ -1477,6 +1550,7 @@ def run_simulation():
         "all_activation_distances": all_activation_distances,
         "all_notch_times": all_notch_times,
         "all_angle_change_times": all_angle_change_times,
+        "all_second_pulse_times": all_second_pulse_times,
 
         "final_mx": final_mx,
         "final_my": final_my,
@@ -1521,6 +1595,8 @@ def run_simulation():
         "final_notch_point": final_notch_point,
         "final_angle_change_point": final_angle_change_point,
         "final_notch_side": final_notch_side,
+        "final_second_pulse_point": final_second_pulse_point,
+        "final_second_pulse_time": final_second_pulse_time,
 
         "final_intercepted": final_intercepted,
         "final_end_time": final_end_time,
@@ -1528,8 +1604,8 @@ def run_simulation():
 
         "total_fuel_kg": total_fuel_kg,
         "dry_mass_kg": dry_mass_kg,
-        "initial_booster_fuel_kg": initial_booster_fuel_kg,
-        "initial_sustainer_fuel_kg": initial_sustainer_fuel_kg,
+        "initial_first_fuel_kg": initial_first_fuel_kg,
+        "initial_second_fuel_kg": initial_second_fuel_kg,
     }
 
 
@@ -1550,8 +1626,19 @@ if run_button:
         st.write(f"Missile reached seeker activation range: **{sum(result['all_activation_distances']) / len(result['all_activation_distances']):.2f} km**")
         st.write(f"Time when it reached seeker activation range: **{sum(result['all_activation_times']) / len(result['all_activation_times']):.2f} sec**")
 
+    if use_dual_pulse:
+        if result["all_second_pulse_times"]:
+            st.write(f"Second pulse started at: **{sum(result['all_second_pulse_times']) / len(result['all_second_pulse_times']):.2f} sec**")
+        else:
+            st.write("Second pulse never started.")
+
     st.write(f"Fuel mass: **{result['total_fuel_kg']:.2f} kg**")
     st.write(f"Dry mass: **{result['dry_mass_kg']:.2f} kg**")
+    st.write(f"First pulse fuel: **{result['initial_first_fuel_kg']:.2f} kg**")
+
+    if use_dual_pulse:
+        st.write(f"Second pulse fuel: **{result['initial_second_fuel_kg']:.2f} kg**")
+
     st.write(f"Missile diameter: **{missile_diameter_m:.3f} m**")
     st.write(f"Drag coefficient Cd: **{drag_coefficient_cd:.2f}**")
     st.write(f"Turn drag multiplier: **{turn_drag_multiplier:.2f}x**")
@@ -1664,26 +1751,25 @@ if run_button:
             f"Mass: {missile_mass_kg:.1f} kg<br>"
             f"Dry: {result['dry_mass_kg']:.1f} kg<br>"
             f"Fuel: {result['total_fuel_kg']:.1f} kg<br>"
+            f"First thrust: {first_pulse_thrust_n:.0f} N<br>"
+            f"First burn: {first_pulse_burn_time:.1f}s<br>"
             f"Diameter: {missile_diameter_m:.3f} m<br>"
             f"Cd: {drag_coefficient_cd:.2f}<br>"
             f"Turn drag: {turn_drag_multiplier:.2f}x"
         ]
 
+        if use_dual_pulse:
+            launch_hover[0] += (
+                f"<br>Second thrust: {second_pulse_thrust_n:.0f} N"
+                f"<br>Second burn: {second_pulse_burn_time:.1f}s"
+                f"<br>Second trigger: {second_pulse_trigger_mode}"
+            )
+
         if use_manual_launch:
-            launch_hover = [
-                f"Missile launch<br>"
-                f"H offset: {launch_horizontal_offset_deg:.1f}°<br>"
-                f"V angle: {launch_vertical_angle_deg:.1f}°<br>"
-                f"Platform M: {launch_platform_mach:.2f}<br>"
-                f"Range: {start_horizontal_range:.2f} km<br>"
-                f"Alt: {missile_altitude:.2f} km<br>"
-                f"Mass: {missile_mass_kg:.1f} kg<br>"
-                f"Dry: {result['dry_mass_kg']:.1f} kg<br>"
-                f"Fuel: {result['total_fuel_kg']:.1f} kg<br>"
-                f"Diameter: {missile_diameter_m:.3f} m<br>"
-                f"Cd: {drag_coefficient_cd:.2f}<br>"
-                f"Turn drag: {turn_drag_multiplier:.2f}x"
-            ]
+            launch_hover[0] += (
+                f"<br>H offset: {launch_horizontal_offset_deg:.1f}°"
+                f"<br>V angle: {launch_vertical_angle_deg:.1f}°"
+            )
 
         fig.add_trace(go.Scatter3d(
             x=[final_mx[0]],
@@ -1730,6 +1816,26 @@ if run_button:
                     f"Seeker activation<br>"
                     f"Range: {activation_range:.2f} km<br>"
                     f"t: {result['final_activation_time']:.2f}s"
+                ],
+                hoverinfo="text"
+            ))
+
+        if use_dual_pulse and result["final_second_pulse_point"] is not None:
+            p = result["final_second_pulse_point"]
+            fig.add_trace(go.Scatter3d(
+                x=[p[0]],
+                y=[p[1]],
+                z=[p[2]],
+                mode="markers+text",
+                name="Second pulse start",
+                text=["2nd pulse"],
+                marker=dict(size=9),
+                hovertext=[
+                    f"Second pulse start<br>"
+                    f"t: {result['final_second_pulse_time']:.2f}s<br>"
+                    f"Thrust: {second_pulse_thrust_n:.0f} N<br>"
+                    f"Burn: {second_pulse_burn_time:.1f}s<br>"
+                    f"Trigger: {second_pulse_trigger_mode}"
                 ],
                 hoverinfo="text"
             ))
