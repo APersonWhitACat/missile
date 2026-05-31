@@ -98,40 +98,20 @@ def manual_launch_direction(missile_pos, target_pos, horizontal_offset_deg, vert
     return relative_direction_from_line(toward_target, horizontal_offset_deg, vertical_angle_deg)
 
 
-def smoothstep(edge0, edge1, x):
-    if edge0 == edge1:
-        return 1.0 if x >= edge1 else 0.0
-
-    t = (x - edge0) / (edge1 - edge0)
-    t = max(0.0, min(1.0, t))
-
-    return t * t * (3.0 - 2.0 * t)
-
-
 def air_density_factor(alt_km):
-    alt_km = max(0.0, alt_km)
+    # Dev/game-style air density factor.
+    # alt_km is converted to meters.
+    # 0 km = 1.0
+    # higher altitude = less air = less drag
+    # above 40 km = 0 air density
+    altitude_m = max(0.0, alt_km * 1000.0)
 
-    realistic_density = math.exp(-alt_km / 8.5)
+    if altitude_m > 40000:
+        return 0.0
 
-    low_altitude_boost = 1.0 + 0.5 * max(0.0, 1.0 - alt_km / 55.0)
-    boosted_density = realistic_density * low_altitude_boost
+    density_factor = (1.0 - 2.25577e-5 * altitude_m) ** 5.25588
 
-    old_high_alt_drag_level = 0.05
-
-    blend_to_45km_level = smoothstep(32.0, 45.0, alt_km)
-    leave_45km_level = smoothstep(45.0, 85.0, alt_km)
-
-    density_up_to_45 = (
-        boosted_density * (1.0 - blend_to_45km_level)
-        + old_high_alt_drag_level * blend_to_45km_level
-    )
-
-    final_density = (
-        density_up_to_45 * (1.0 - leave_45km_level)
-        + realistic_density * leave_45km_level
-    )
-
-    return max(0.0, final_density)
+    return max(0.0, density_factor)
 
 
 def mach_drag_factor(mach):
@@ -710,7 +690,7 @@ with st.sidebar:
 
     missile_drag_strength = st.number_input(
         "Missile drag strength",
-        value=0.100,
+        value=0.010,
         min_value=0.0,
         step=0.005,
         format="%.4f",
@@ -726,7 +706,7 @@ with st.sidebar:
         help="Extra speed loss while the missile turns. 0 disables turn drag."
     )
 
-    st.caption("Drag now uses momentum: heavier missiles resist drag more, lighter missiles slow faster.")
+    st.caption("Drag uses dev-style air density: less air at altitude, 0 air above 40 km.")
 
     start_horizontal_range = st.number_input("Starting horizontal distance from target km", value=40.0, step=1.0)
     activation_range = st.number_input("Seeker activation range km", value=12.0, step=0.5)
