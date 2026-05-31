@@ -710,7 +710,7 @@ with st.sidebar:
 
     missile_drag_strength = st.number_input(
         "Missile drag strength",
-        value=0.020,
+        value=0.100,
         min_value=0.0,
         step=0.005,
         format="%.4f",
