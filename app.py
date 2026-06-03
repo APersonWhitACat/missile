@@ -116,22 +116,22 @@ def air_density_kg_m3(alt_km):
     return SEA_LEVEL_DENSITY * air_density_factor(alt_km)
 
 
-def frontal_area_m2(diameter_m):
-    radius = max(0.001, diameter_m / 2.0)
-    return math.pi * radius * radius
+def game_drag_forces(speed_ms, alt_km, parasitic_cd, angle_delta_rad, turn_coefficient):
+    # Dev/game-style drag:
+    # Cd = parasitic Cd + parasitic Cd * sin(angle delta) * turn coefficient
+    # Drag = Cd * (1.225 * density factor * velocity^2) / 2
+    density_factor = air_density_factor(alt_km)
+    base_cd = max(0.0, parasitic_cd)
+    turn_add_cd = base_cd * math.sin(abs(angle_delta_rad)) * max(0.0, turn_coefficient)
+    final_cd = base_cd + turn_add_cd
 
+    dynamic_pressure_like = (SEA_LEVEL_DENSITY * density_factor * speed_ms * speed_ms) / 2.0
 
-def drag_force_newtons(speed_ms, alt_km, diameter_m, cd):
-    rho = air_density_kg_m3(alt_km)
-    area = frontal_area_m2(diameter_m)
-    return 0.5 * rho * speed_ms * speed_ms * cd * area
+    base_drag_force = base_cd * dynamic_pressure_like
+    turn_drag_force = turn_add_cd * dynamic_pressure_like
+    total_drag_force = final_cd * dynamic_pressure_like
 
-
-def turn_drag_force_newtons(base_drag_force, turn_rate_deg_s, turn_bleed_multiplier):
-    if turn_bleed_multiplier <= 0.0:
-        return 0.0
-    turn_factor = (max(0.0, turn_rate_deg_s) / 100.0) ** 2
-    return base_drag_force * turn_bleed_multiplier * turn_factor
+    return base_drag_force, turn_drag_force, total_drag_force, final_cd
 
 
 # ============================================================
@@ -604,8 +604,7 @@ with st.sidebar:
     missile_max_g = st.number_input("Missile max G", value=0.0, min_value=0.0, step=1.0)
 
     st.header("Missile Drag")
-    missile_diameter_m = st.number_input("Missile diameter m", value=0.0, min_value=0.0, step=0.001, format="%.3f")
-    drag_coefficient_cd = st.number_input("Drag coefficient Cd", value=0.0, min_value=0.0, step=0.01, format="%.4f")
+    drag_coefficient_cd = st.number_input("Cd", value=0.0, min_value=0.0, step=0.001, format="%.4f")
     turn_bleed_multiplier = st.number_input("TurnBleedMultiplier", value=0.0, min_value=0.0, step=0.1, format="%.2f")
 
     start_horizontal_range = st.number_input("Starting horizontal distance from target km", value=40.0, step=1.0)
@@ -1097,15 +1096,20 @@ def run_simulation():
             old_dir_for_turn = vec_norm(prev_missile_vel)
             new_dir_for_turn = vec_norm(missile_vel)
             turn_dot = max(-1.0, min(1.0, vec_dot(old_dir_for_turn, new_dir_for_turn)))
-            actual_turn_rate = math.degrees(math.acos(turn_dot)) / DT if DT > 0 else 0.0
+            angle_delta_rad = math.acos(turn_dot)
+            actual_turn_rate = math.degrees(angle_delta_rad) / DT if DT > 0 else 0.0
 
             missile_speed = vec_mag(missile_vel)
             missile_mach = missile_speed / sound_speed
             missile_alt_km = missile_pos[2] / 1000.0
 
-            base_drag_force = drag_force_newtons(missile_speed, missile_alt_km, missile_diameter_m, drag_coefficient_cd)
-            extra_turn_drag_force = turn_drag_force_newtons(base_drag_force, actual_turn_rate, turn_bleed_multiplier)
-            total_drag_force = base_drag_force + extra_turn_drag_force
+            base_drag_force, extra_turn_drag_force, total_drag_force, current_final_cd = game_drag_forces(
+                missile_speed,
+                missile_alt_km,
+                drag_coefficient_cd,
+                angle_delta_rad,
+                turn_bleed_multiplier
+            )
             drag_accel_ms2 = total_drag_force / current_mass_kg
 
             missile_speed = max(0.0, missile_speed - drag_accel_ms2 * DT)
@@ -1427,7 +1431,6 @@ if run_button:
             f"Fuel: {result['total_fuel_kg']:.1f} kg<br>"
             f"Booster thrust: {booster_thrust_n:.0f} N<br>"
             f"Booster burn: {booster_burn_time:.1f}s<br>"
-            f"Diameter: {missile_diameter_m:.3f} m<br>"
             f"Cd: {drag_coefficient_cd:.4f}<br>"
             f"TurnBleedMultiplier: {turn_bleed_multiplier:.2f}x"
         )
